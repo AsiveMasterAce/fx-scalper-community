@@ -202,6 +202,15 @@ onBeforeUnmount(() => clearInterval(pollTimer))
 
 const stats = computed(() => bootstrapData.value.stats || {})
 const market = computed(() => bootstrapData.value.market || [])
+const groupedMarket = computed(() => {
+  const groups = new Map()
+  for (const row of market.value) {
+    const label = row.asset_class || 'Other markets'
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label).push(row)
+  }
+  return Array.from(groups, ([label, rows]) => ({ label, rows }))
+})
 const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
@@ -1406,73 +1415,52 @@ onMounted(fetchBootstrap)
               <button v-if="scanFailed" class="button secondary" type="button" :disabled="busy" @click="scanMarket">Try again</button>
             </div>
           </div>
-          <div class="section-body grid-cards">
-            <div v-for="row in market" :key="row.symbol" class="item-card">
-              <div class="item-row">
-                <div>
-                  <div class="item-title">{{ row.symbol }}</div>
-                  <div class="muted">{{ row.asset_class }} · {{ row.regime }}</div>
-                </div>
-                <span class="signal-pill" :class="row.decision.toLowerCase()">{{ row.decision }}</span>
+          <div class="section-body market-groups">
+            <section v-for="group in groupedMarket" :key="group.label" class="market-group">
+              <div class="market-group-head">
+                <h3>{{ group.label }}</h3>
+                <span class="muted">{{ group.rows.length }} {{ group.rows.length === 1 ? 'market' : 'markets' }}</span>
               </div>
-              <div class="metric-grid">
-                <div class="metric">
-                  <span class="metric-label">Price</span>
-                  <span class="metric-value">{{ row.price }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">ADX</span>
-                  <span class="metric-value">{{ row.adx }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">RSI</span>
-                  <span class="metric-value">{{ row.rsi }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">VWAP</span>
-                  <span class="metric-value">{{ row.price_vs_vwap }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">Suggested stop loss</span>
-                  <span class="metric-value">{{ row.stop_loss ?? '—' }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">Suggested take profit</span>
-                  <span class="metric-value">{{ row.take_profit ?? '—' }}</span>
-                </div>
-                <div class="metric">
-                  <span class="metric-label">Reward / risk</span>
-                  <span class="metric-value">{{ row.risk_reward_ratio ? `${row.risk_reward_ratio}:1` : '—' }}</span>
-                </div>
+              <div class="table-wrap market-table-wrap">
+                <table class="market-table">
+                  <thead>
+                    <tr>
+                      <th>Market</th><th>Suggestion</th><th class="num">Price</th><th class="num">ADX</th>
+                      <th class="num">RSI</th><th>VWAP</th><th class="num">Stop loss</th>
+                      <th class="num">Take profit</th><th class="num">Reward / risk</th><th>Guidance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in group.rows" :key="row.symbol">
+                      <td><strong class="nowrap">{{ row.symbol }}</strong><span class="market-regime">{{ row.regime }}</span></td>
+                      <td><span class="signal-pill" :class="row.decision.toLowerCase()">{{ row.decision }}</span></td>
+                      <td class="num nowrap">{{ row.price }}</td>
+                      <td class="num">{{ row.adx }}</td>
+                      <td class="num">{{ row.rsi }}</td>
+                      <td>{{ row.price_vs_vwap }}</td>
+                      <td class="num">{{ row.stop_loss ?? '—' }}</td>
+                      <td class="num">{{ row.take_profit ?? '—' }}</td>
+                      <td class="num nowrap">{{ row.risk_reward_ratio ? `${row.risk_reward_ratio}:1` : '—' }}</td>
+                      <td class="market-guidance">
+                        <strong>{{ row.trade_plan?.entry || row.reason }}</strong>
+                        <span v-if="row.trade_plan"><b>When to place:</b> {{ row.trade_plan.when_to_place }}</span>
+                        <span v-if="row.trade_plan"><b>When to stop:</b> {{ row.trade_plan.when_to_stop }}</span>
+                        <span v-if="row.trade_plan"><b>When to take profit:</b> {{ row.trade_plan.when_to_take_profit }}</span>
+                        <span v-if="row.trade_plan"><b>Cancel this idea:</b> {{ row.trade_plan.cancel_if }}</span>
+                        <span class="muted">{{ row.reason }}</span>
+                        <span v-if="row.exit_recommendation_basis" class="muted">
+                          {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
+                        </span>
+                        <div class="actions market-actions">
+                          <button class="button secondary" :disabled="busy || row.decision === 'HOLD'" @click="quickTrade(row)">Open From Signal</button>
+                          <button class="button secondary" :disabled="busy || row.decision === 'HOLD' || !liveTradingReady" @click="quickLiveTrade(row)">Send Live Order</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-              <p class="note">{{ row.reason }}</p>
-              <div v-if="row.trade_plan" class="scan-summary">
-                <strong>{{ row.trade_plan.entry }}</strong>
-                <span><b>When to place:</b> {{ row.trade_plan.when_to_place }}</span>
-                <span><b>When to stop:</b> {{ row.trade_plan.when_to_stop }}</span>
-                <span><b>When to take profit:</b> {{ row.trade_plan.when_to_take_profit }}</span>
-                <span><b>Cancel this idea:</b> {{ row.trade_plan.cancel_if }}</span>
-              </div>
-              <p v-if="row.exit_recommendation_basis" class="note muted">
-                {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
-              </p>
-              <div class="actions">
-                <button
-                  class="button secondary"
-                  :disabled="busy || row.decision === 'HOLD'"
-                  @click="quickTrade(row)"
-                >
-                  Open From Signal
-                </button>
-                <button
-                  class="button secondary"
-                  :disabled="busy || row.decision === 'HOLD' || !liveTradingReady"
-                  @click="quickLiveTrade(row)"
-                >
-                  Send Live Order
-                </button>
-              </div>
-            </div>
+            </section>
             <div v-if="!market.length" class="empty-state">
               {{ scanFailed ? 'No suggestions can be created without current prices. Try again when the provider is available.' : 'Choose markets in Setup, then select “Look for opportunities”.' }}
             </div>
