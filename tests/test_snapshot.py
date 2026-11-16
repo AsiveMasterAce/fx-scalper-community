@@ -106,6 +106,9 @@ def test_a_trending_series_drives_the_engine_to_a_buy(make_candles):
     assert decision["reason"]
     assert decision["stop_loss"] < decision["price"] < decision["take_profit"]
     assert decision["risk_reward_ratio"] == pytest.approx(2.0)
+    assert decision["trade_plan"]["action"] == "BUY"
+    assert "fresh market check" in decision["trade_plan"]["when_to_place"]
+    assert str(decision["stop_loss"]) in decision["trade_plan"]["when_to_stop"]
 
 
 def test_a_falling_series_drives_the_engine_to_a_sell(make_candles):
@@ -118,6 +121,16 @@ def test_a_falling_series_drives_the_engine_to_a_sell(make_candles):
     assert decision["decision"] == "SELL"
     assert decision["take_profit"] < decision["price"] < decision["stop_loss"]
     assert decision["risk_reward_ratio"] == pytest.approx(2.0)
+    assert decision["trade_plan"]["action"] == "SELL"
+
+
+def test_hold_explains_that_no_trade_should_be_placed(make_candles):
+    values = [1.08] * 220
+    snapshot = build_snapshot("frxEURUSD", "FOREX", candles_for(make_candles, values))
+    decision = evaluate_snapshot(dict(snapshot), BALANCED)
+    assert decision["decision"] == "HOLD"
+    assert decision["trade_plan"]["action"] == "WAIT"
+    assert decision["trade_plan"]["entry"] == "Do not place a trade yet."
 
 
 def test_build_market_snapshots_uses_the_provider(make_candles):

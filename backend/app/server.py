@@ -600,6 +600,47 @@ def recommended_exit_levels(snapshot: dict, decision: str) -> dict:
     }
 
 
+def plain_language_trade_plan(snapshot: dict, decision: str, exits: dict) -> dict:
+    """Explain an existing signal without changing how that signal is produced."""
+    symbol = str(snapshot.get("symbol") or "this market")
+    price = round(float(snapshot.get("price") or 0.0), 5)
+    if decision not in {"BUY", "SELL"}:
+        return {
+            "action": "WAIT",
+            "entry": "Do not place a trade yet.",
+            "when_to_place": "Run another market check and wait for a BUY or SELL recommendation.",
+            "when_to_stop": "No stop loss is needed because there is no recommended entry.",
+            "when_to_take_profit": "No take-profit level is needed because there is no recommended entry.",
+            "cancel_if": "Keep waiting while the recommendation remains HOLD.",
+        }
+
+    stop_loss = exits.get("stop_loss")
+    take_profit = exits.get("take_profit")
+    opposite = "SELL" if decision == "BUY" else "BUY"
+    return {
+        "action": decision,
+        "entry": f"{decision} {symbol} near {price}.",
+        "when_to_place": (
+            f"Run a fresh market check immediately before entering. Place the trade only while "
+            f"the recommendation still says {decision}."
+        ),
+        "when_to_stop": (
+            f"Exit the trade if price reaches {stop_loss}."
+            if stop_loss is not None
+            else "A stop-loss level is unavailable, so do not place this trade."
+        ),
+        "when_to_take_profit": (
+            f"Close the trade in profit if price reaches {take_profit}."
+            if take_profit is not None
+            else "A take-profit level is unavailable, so do not place this trade."
+        ),
+        "cancel_if": (
+            f"Do not enter if the recommendation changes to HOLD or {opposite}, or if price has "
+            "already moved beyond the suggested stop loss."
+        ),
+    }
+
+
 def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
     thresholds = signal_thresholds(settings.get("risk_profile", "balanced"))
     regime = classify_regime(snapshot, thresholds)
@@ -632,12 +673,14 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
     elif stretched:
         reason = "Overextension guard blocked a late or stretched entry."
     exits = recommended_exit_levels(snapshot, decision)
+    trade_plan = plain_language_trade_plan(snapshot, decision, exits)
     return {
         **snapshot,
         "regime": regime,
         "decision": decision,
         "reason": reason,
         **exits,
+        "trade_plan": trade_plan,
         "generated_at": utc_now_iso(),
     }
 

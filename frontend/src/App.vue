@@ -1446,6 +1446,13 @@ onMounted(fetchBootstrap)
                 </div>
               </div>
               <p class="note">{{ row.reason }}</p>
+              <div v-if="row.trade_plan" class="scan-summary">
+                <strong>{{ row.trade_plan.entry }}</strong>
+                <span><b>When to place:</b> {{ row.trade_plan.when_to_place }}</span>
+                <span><b>When to stop:</b> {{ row.trade_plan.when_to_stop }}</span>
+                <span><b>When to take profit:</b> {{ row.trade_plan.when_to_take_profit }}</span>
+                <span><b>Cancel this idea:</b> {{ row.trade_plan.cancel_if }}</span>
+              </div>
               <p v-if="row.exit_recommendation_basis" class="note muted">
                 {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
               </p>
