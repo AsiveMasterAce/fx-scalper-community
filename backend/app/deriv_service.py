@@ -40,7 +40,10 @@ class DerivCommunityClient:
     @staticmethod
     def _normalize_app_id(value: object) -> str:
         raw = str(value or "").strip()
-        return raw if raw.isdigit() else "1089"
+        # Current Deriv applications use opaque alphanumeric IDs. Older apps
+        # commonly used numeric IDs, so preserve any non-empty value and only
+        # fall back to the public legacy ID when no App ID was supplied.
+        return raw or "1089"
 
     @staticmethod
     def _normalize_token(value: object) -> str:
@@ -223,7 +226,8 @@ class DerivCommunityClient:
         return self.send({"balance": 1}).get("balance") or {}
 
     def get_active_symbols(self) -> list[dict]:
-        return self.send({"active_symbols": "brief", "product_type": "basic"}).get("active_symbols") or []
+        # The current Deriv API removed the legacy product_type filter.
+        return self.send({"active_symbols": "brief"}).get("active_symbols") or []
 
     def account_snapshot(self) -> dict:
         account = self._selected_account or {}

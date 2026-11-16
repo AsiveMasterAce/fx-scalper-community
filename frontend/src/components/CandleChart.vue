@@ -11,6 +11,7 @@ const props = defineProps({
 const W = 600
 const H = 220
 const PAD = 12
+const KNOWN_LABELS = { frxXAUUSD: 'Gold/USD' }
 const selected = ref('')
 const candles = ref([])
 const error = ref('')
@@ -34,7 +35,16 @@ async function load() {
   loadingChart.value = true
   try {
     const { data } = await props.api.get('candles', { params: { symbol: selected.value, count: 120 } })
-    candles.value = data.candles || []
+    candles.value = (data.candles || [])
+      .map((candle) => ({
+        ...candle,
+        epoch: Number(candle.epoch),
+        open: Number(candle.open),
+        high: Number(candle.high),
+        low: Number(candle.low),
+        close: Number(candle.close),
+      }))
+      .filter((candle) => [candle.epoch, candle.open, candle.high, candle.low, candle.close].every(Number.isFinite))
     error.value = ''
   } catch (err) {
     candles.value = []
@@ -93,6 +103,31 @@ const markers = computed(() => {
 })
 
 const last = computed(() => candles.value[candles.value.length - 1])
+const selectedItem = computed(() => props.symbols.find((item) => item.symbol === selected.value))
+const selectedLabel = computed(() => {
+  const item = selectedItem.value
+  const configured = item?.label || item?.display_name
+  return configured && configured !== selected.value ? configured : (KNOWN_LABELS[selected.value] || selected.value)
+})
+const priceRange = computed(() => {
+  if (!candles.value.length) return []
+  const high = Math.max(...candles.value.map((candle) => candle.high))
+  const low = Math.min(...candles.value.map((candle) => candle.low))
+  return [high, low + (high - low) / 2, low]
+})
+function formatPrice(value) {
+  if (!Number.isFinite(Number(value))) return '–'
+  const number = Number(value)
+  if (selected.value === 'frxXAUUSD') return number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return number.toLocaleString(undefined, { maximumFractionDigits: number < 10 ? 5 : 2 })
+}
+const friendlyError = computed(() => {
+  if (!error.value) return ''
+  if (/could not connect|handshake status|cloudflare/i.test(error.value)) {
+    return `The ${selectedLabel.value} price provider is temporarily unavailable. Your setup is safe; try again in a moment.`
+  }
+  return error.value
+})
 const change = computed(() => {
   const rows = candles.value
   return rows.length > 1 ? (rows[rows.length - 1].close / rows[0].open - 1) * 100 : null
@@ -102,30 +137,38 @@ const change = computed(() => {
 <template>
   <article class="card section-card chart-card">
     <div class="section-head chart-head">
-      <h2>Price Chart</h2>
+      <h2>{{ selectedLabel || 'Market' }} price</h2>
       <select v-if="symbols.length" v-model="selected" class="select" aria-label="Chart symbol">
         <option v-for="item in symbols" :key="`chart-${item.symbol}`" :value="item.symbol">{{ item.label || item.symbol }}</option>
       </select>
       <span v-if="last" class="kv">
-        {{ last.close }}
+        {{ formatPrice(last.close) }}
         <span v-if="change !== null" :class="change >= 0 ? 'up' : 'down'">{{ change >= 0 ? '+' : '' }}{{ change.toFixed(2) }}%</span>
       </span>
     </div>
     <div class="section-body">
       <div v-if="!symbols.length" class="empty-state">Add a symbol or press "Try demo data" to see a chart.</div>
-      <div v-else-if="error" class="note">{{ error }}</div>
-      <svg v-else-if="bars.length" :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" class="candle-svg" role="img" :aria-label="`${selected} last ${bars.length} candles with trade markers`">
-        <g v-for="(bar, i) in bars" :key="i" :class="bar.up ? 'candle-up' : 'candle-down'">
-          <line :x1="bar.x" :x2="bar.x" :y1="bar.hi" :y2="bar.lo" stroke="currentColor" vector-effect="non-scaling-stroke" />
-          <rect :x="bar.x - bar.w / 2" :y="bar.top" :width="bar.w" :height="bar.h" fill="currentColor" />
-        </g>
-        <polygon
-          v-for="(m, i) in markers"
-          :key="`m-${i}`"
-          :points="m.buy ? `${m.x},${m.y - 6} ${m.x - 5},${m.y + 4} ${m.x + 5},${m.y + 4}` : `${m.x},${m.y + 6} ${m.x - 5},${m.y - 4} ${m.x + 5},${m.y - 4}`"
-          :class="m.buy ? 'marker-buy' : 'marker-sell'"
-        />
-      </svg>
+      <div v-else-if="error" class="chart-error">
+        <p class="note">{{ friendlyError }}</p>
+        <button class="button secondary" type="button" :disabled="loadingChart" @click="load">Try loading again</button>
+      </div>
+      <div v-else-if="bars.length" class="chart-stage">
+        <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" class="candle-svg" role="img" :aria-label="`${selectedLabel} last ${bars.length} candles with trade markers`">
+          <g v-for="(bar, i) in bars" :key="i" :class="bar.up ? 'candle-up' : 'candle-down'">
+            <line :x1="bar.x" :x2="bar.x" :y1="bar.hi" :y2="bar.lo" stroke="currentColor" vector-effect="non-scaling-stroke" />
+            <rect :x="bar.x - bar.w / 2" :y="bar.top" :width="bar.w" :height="bar.h" fill="currentColor" />
+          </g>
+          <polygon
+            v-for="(m, i) in markers"
+            :key="`m-${i}`"
+            :points="m.buy ? `${m.x},${m.y - 6} ${m.x - 5},${m.y + 4} ${m.x + 5},${m.y + 4}` : `${m.x},${m.y + 6} ${m.x - 5},${m.y - 4} ${m.x + 5},${m.y - 4}`"
+            :class="m.buy ? 'marker-buy' : 'marker-sell'"
+          />
+        </svg>
+        <div class="price-axis" aria-hidden="true">
+          <span v-for="price in priceRange" :key="price">{{ formatPrice(price) }}</span>
+        </div>
+      </div>
       <div v-else class="empty-state">{{ loadingChart ? 'Loading candles…' : 'No candles yet.' }}</div>
       <p class="muted chart-legend">▲ buy · ▼ sell entries from the journal</p>
     </div>

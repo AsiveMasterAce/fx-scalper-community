@@ -44,6 +44,25 @@ def test_clear_deriv_token_forgets_it(client):
     assert cleared.get_json()["settings"]["deriv_token_set"] is False
 
 
+def test_deriv_client_preserves_alphanumeric_pat_app_id():
+    from app.deriv_service import DerivCommunityClient
+
+    client = DerivCommunityClient(app_id="34Wlf1aCGIjxxnkCqBz1K", token=TOKEN)
+    assert client.app_id == "34Wlf1aCGIjxxnkCqBz1K"
+
+
+def test_deriv_active_symbols_uses_current_request_schema(monkeypatch):
+    from app.deriv_service import DerivCommunityClient
+
+    client = DerivCommunityClient(app_id="app-id", token=TOKEN)
+    sent = []
+    monkeypatch.setattr(client, "send", lambda payload: sent.append(payload) or {"active_symbols": []})
+
+    client.get_active_symbols()
+
+    assert sent == [{"active_symbols": "brief"}]
+
+
 def test_api_key_is_optional_by_default(client):
     assert client.get("/api/bootstrap").status_code == 200
 

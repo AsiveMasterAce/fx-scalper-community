@@ -311,7 +311,7 @@ def normalize_symbols(symbols: object) -> list[dict]:
         cleaned.append(
             {
                 "symbol": symbol,
-                "label": str(item.get("label") or symbol).strip() or symbol,
+                "label": str(item.get("label") or item.get("display_name") or symbol).strip() or symbol,
                 "asset_class": normalize_asset_class(item.get("asset_class")),
             }
         )
@@ -348,6 +348,7 @@ def normalize_market_snapshots(snapshots: object, symbol_map: dict[str, dict]) -
                 "ema_slow": float(item.get("ema_slow") or price),
                 "adx": float(item.get("adx") or 0.0),
                 "rsi": float(item.get("rsi") or 50.0),
+                "atr": max(0.0, float(item.get("atr") or 0.0)),
                 "atr_ratio": float(item.get("atr_ratio") or 1.0),
                 "price_vs_vwap": (
                     "below"
@@ -571,6 +572,34 @@ def classify_regime(snapshot: dict, thresholds: dict[str, float]) -> str:
     return "RANGING"
 
 
+def recommended_exit_levels(snapshot: dict, decision: str) -> dict:
+    """Return educational ATR-based exit levels for a qualified signal."""
+    if decision not in {"BUY", "SELL"}:
+        return {
+            "stop_loss": None,
+            "take_profit": None,
+            "risk_reward_ratio": None,
+            "exit_recommendation_basis": None,
+        }
+    price = float(snapshot.get("price") or 0.0)
+    atr_value = float(snapshot.get("atr") or 0.0)
+    if price <= 0 or atr_value <= 0:
+        return {
+            "stop_loss": None,
+            "take_profit": None,
+            "risk_reward_ratio": None,
+            "exit_recommendation_basis": "Unavailable because ATR data is missing.",
+        }
+    risk_distance = 1.5 * atr_value
+    direction = 1.0 if decision == "BUY" else -1.0
+    return {
+        "stop_loss": round(price - direction * risk_distance, 5),
+        "take_profit": round(price + direction * risk_distance * 2.0, 5),
+        "risk_reward_ratio": 2.0,
+        "exit_recommendation_basis": "ATR-based: 1.5× ATR risk with a 2:1 reward-to-risk target.",
+    }
+
+
 def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
     thresholds = signal_thresholds(settings.get("risk_profile", "balanced"))
     regime = classify_regime(snapshot, thresholds)
@@ -602,7 +631,15 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
         reason = "ATR compression suggests low opportunity quality."
     elif stretched:
         reason = "Overextension guard blocked a late or stretched entry."
-    return {**snapshot, "regime": regime, "decision": decision, "reason": reason, "generated_at": utc_now_iso()}
+    exits = recommended_exit_levels(snapshot, decision)
+    return {
+        **snapshot,
+        "regime": regime,
+        "decision": decision,
+        "reason": reason,
+        **exits,
+        "generated_at": utc_now_iso(),
+    }
 
 
 def market_view(settings: dict) -> list[dict]:
@@ -1678,6 +1715,8 @@ def auto_trade_tick(now=None) -> dict:
             report = run_market_scan(state)
             if report.get("errors") and not report.get("scanned"):
                 auto["last_error"] = report["errors"][0]["error"]
+            elif report.get("scanned"):
+                auto["last_error"] = ""
             close_due_paper_positions(state, auto, now)
             reason, halt = blocking_reason(auto, state["settings"], now)
             auto["paused_reason"] = "" if halt else reason

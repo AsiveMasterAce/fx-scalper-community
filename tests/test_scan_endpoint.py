@@ -54,6 +54,8 @@ def test_scan_builds_snapshots_and_signals_from_candles(client):
     assert market[0]["regime"] == "TRENDING"
     assert market[0]["decision"] == "BUY"
     assert market[0]["reason"]
+    assert market[0]["stop_loss"] < market[0]["price"] < market[0]["take_profit"]
+    assert market[0]["risk_reward_ratio"] == 2.0
 
 
 def test_scan_persists_so_the_dashboard_bootstrap_shows_it(client):

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { formatSastDateTime } from '../time.js'
 
 const props = defineProps({
   api: { type: Function, required: true },
@@ -81,7 +82,7 @@ const rows = computed(() => {
           </thead>
           <tbody>
             <tr v-for="(row, i) in rows" :key="`${row.timestamp}-${i}`">
-              <td class="nowrap">{{ String(row.timestamp || '').replace('T', ' ').slice(0, 19) }}</td>
+              <td class="nowrap">{{ formatSastDateTime(row.timestamp) }}</td>
               <td><span class="pill">{{ row.type }}</span></td>
               <td>{{ row.symbol || '–' }}</td>
               <td :class="row.side === 'BUY' ? 'up' : row.side === 'SELL' ? 'down' : ''">{{ row.side || '–' }}</td>

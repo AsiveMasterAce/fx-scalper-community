@@ -70,3 +70,9 @@ def test_provider_from_settings_builds_a_deriv_provider_with_app_id():
     provider = provider_from_settings({"deriv_app_id": "12345"})
     assert isinstance(provider, DerivCandleProvider)
     assert "app_id=12345" in provider.url
+    assert "api.derivws.com/trading/v1/options/ws/public" in provider.url
+
+
+def test_deriv_provider_migrates_the_saved_legacy_websocket_url():
+    provider = DerivCandleProvider(ws_url="wss://ws.derivws.com/websockets/v3")
+    assert "api.derivws.com/trading/v1/options/ws/public" in provider.url

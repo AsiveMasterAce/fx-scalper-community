@@ -1,0 +1,26 @@
+timestamp,type,symbol,side,exposure,note
+2026-11-12T13:50:50.518808Z,OPEN,frxEURUSD,BUY,250.0,Paper trade opened from community dashboard.
+2026-11-12T14:11:39.639047Z,OPEN,frxEURUSD,BUY,250.0,Paper trade opened from community dashboard.
+2026-11-12T18:44:13.523340Z,REBALANCE_CLOSE,frxEURUSD,BUY,250.0,FOREX is overweight by 60.00%; reduce exposure until drift is within tolerance.
+2026-11-12T18:49:41.285045Z,AUTO_START,,,0.0,Auto-trader started in paper mode.
+2026-11-12T18:49:52.463067Z,OPEN,frxEURUSD,BUY,250.0,Paper trade opened from community dashboard.
+2026-11-13T12:01:06.443494Z,AUTO_STOP,,,0.0,Auto-trader stopped.
+2026-11-13T12:40:11.741097Z,REBALANCE_CLOSE,frxEURUSD,BUY,250.0,FOREX is overweight by 60.00%; reduce exposure until drift is within tolerance.
+2026-11-13T13:46:38.861916Z,AUTO_START,,,0.0,Auto-trader started in paper mode.
+2026-11-13T13:50:51.595395Z,AUTO_START,,,0.0,Auto-trader started in paper mode.
+2026-11-13T15:34:24.226885Z,OPEN,frxXAUUSD,BUY,250.0,Paper trade opened from community dashboard.
+2026-11-13T15:55:17.355568Z,AUTO_OPEN,frxEURUSD,SELL,100.0,"Auto paper SELL at 1.10317: Downtrend structure, momentum, and price positioning are aligned."
+2026-11-13T16:21:48.431815Z,AUTO_CLOSE,frxEURUSD,SELL,100.0,Closed at 1.10335 after the hold time. P&L -0.02.
+2026-11-13T16:21:48.434804Z,AUTO_OPEN,frxEURUSD,SELL,100.0,"Auto paper SELL at 1.10335: Downtrend structure, momentum, and price positioning are aligned."
+2026-11-13T16:47:14.700843Z,AUTO_CLOSE,frxEURUSD,SELL,100.0,Closed at 1.10317 after the hold time. P&L +0.02.
+2026-11-13T17:47:44.073218Z,REBALANCE_CLOSE,frxXAUUSD,BUY,250.0,COMMODITIES is overweight by 80.00%; reduce exposure until drift is within tolerance.
+2026-11-13T20:00:46.077808Z,AUTO_OPEN,frxEURUSD,SELL,100.0,"Auto paper SELL at 1.1024: Downtrend structure, momentum, and price positioning are aligned."
+2026-11-13T20:03:10.157060Z,OPEN,frxEURUSD,SELL,250.0,Paper trade opened from community dashboard.
+2026-11-13T20:05:51.069500Z,AUTO_OPEN,frxXAUUSD,SELL,100.0,"Auto paper SELL at 3874.45: Downtrend structure, momentum, and price positioning are aligned."
+2026-11-13T20:24:27.130463Z,OPEN,frxXAUUSD,SELL,250.0,Paper trade opened from community dashboard.
+2026-11-13T20:26:48.547669Z,AUTO_CLOSE,frxEURUSD,SELL,100.0,Closed at 1.10219 after the hold time. P&L +0.02.
+2026-11-13T20:31:52.570002Z,AUTO_CLOSE,frxXAUUSD,SELL,100.0,Closed at 3878.39 after the hold time. P&L -0.10.
+2026-11-14T03:43:25.233555Z,DAILY_SUMMARY,,,0.0,"2026-11-13: 4 trades opened, 2 won / 2 lost, realized P&L -0.08."
+2026-11-14T05:34:10.791547Z,AUTO_STOP,,,0.0,Auto-trader stopped.
+2026-11-14T14:21:19.809573Z,REBALANCE_CLOSE,frxXAUUSD,SELL,250.0,COMMODITIES is overweight by 30.00%; reduce exposure until drift is within tolerance.
+2026-11-14T14:21:19.825479Z,REBALANCE_CLOSE,frxEURUSD,SELL,250.0,FOREX is overweight by 10.00%; reduce exposure until drift is within tolerance.

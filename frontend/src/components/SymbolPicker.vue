@@ -49,7 +49,7 @@ function write(list) {
 function add(symbol, assetClass, label) {
   const clean = String(symbol || '').trim()
   if (!clean || current.value === null || current.value.some((item) => item.symbol === clean)) return
-  write([...current.value, { symbol: clean, asset_class: assetClass, ...(label ? { display_name: label } : {}) }])
+  write([...current.value, { symbol: clean, asset_class: assetClass, ...(label ? { label } : {}) }])
   draft.value = ''
 }
 

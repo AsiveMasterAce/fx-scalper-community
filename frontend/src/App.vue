@@ -5,9 +5,12 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import JournalTable from './components/JournalTable.vue'
 import SymbolPicker from './components/SymbolPicker.vue'
 import ToastStack from './components/ToastStack.vue'
+import { formatSastDateTime, formatSastTime } from './time.js'
 import axios from 'axios'
 
 const baseUrl = import.meta.env.BASE_URL || '/'
+const utcHourToSast = (hour) => (Number(hour || 0) + 2) % 24
+const sastHourToUtc = (hour) => (Number(hour || 0) + 22) % 24
 const apiBaseUrl = (
   import.meta.env.VITE_API_BASE_URL ||
   `${baseUrl.replace(/\/+$/, '') || ''}/api/`
@@ -121,22 +124,31 @@ const marketSnapshotsJson = ref('[]')
 const liveOrderResult = ref(null)
 
 const TABS = [
-  ['dashboard', 'Dashboard'],
-  ['trade', 'Trade'],
-  ['backtest', 'Backtest'],
-  ['journal', 'Journal'],
-  ['settings', 'Settings'],
+  { id: 'dashboard', label: 'Home', icon: '⌂' },
+  { id: 'trade', label: 'Practice trade', icon: '▶' },
+  { id: 'journal', label: 'My activity', icon: '☷' },
+  { id: 'backtest', label: 'Test strategy', icon: '✓' },
+  { id: 'settings', label: 'Setup', icon: '⚙' },
 ]
+const TAB_HELP = {
+  dashboard: { title: 'Your starting point', text: 'See what the app is doing and whether anything needs your attention.', tip: 'New here? Use sample data, then visit Practice trade. No real money is used unless you deliberately enable live trading.' },
+  trade: { title: 'Practice without risking money', text: 'Try opening and closing a pretend trade so you can learn how the process works.', tip: 'A “buy” expects the price to rise. A “sell” expects it to fall. The amount at risk is shown before you continue.' },
+  journal: { title: 'Review what happened', text: 'See your previous practice and live trades in one place.', tip: 'Look for patterns over many trades. One win or loss does not tell you whether a strategy is reliable.' },
+  backtest: { title: 'Try the strategy on past data', text: 'Run a safe simulation to see how the strategy might have behaved before today.', tip: 'Past results are useful for learning, but they cannot predict or guarantee future results.' },
+  settings: { title: 'Choose how the app should work', text: 'Connect a data source, choose markets, and set safety limits.', tip: 'You can leave advanced options unchanged. The starter settings are designed for practice.' },
+}
 const initialTab = window.location.hash.slice(1)
-const tab = ref(TABS.some(([id]) => id === initialTab) ? initialTab : 'dashboard')
+const tab = ref(TABS.some((item) => item.id === initialTab) ? initialTab : 'dashboard')
+const currentTabHelp = computed(() => TAB_HELP[tab.value])
+const showPageHelp = ref(true)
 watch(tab, (value) => window.history.replaceState(null, '', `#${value}`))
 window.addEventListener('hashchange', () => {
   const next = window.location.hash.slice(1)
-  if (TABS.some(([id]) => id === next)) tab.value = next
+  if (TABS.some((item) => item.id === next)) tab.value = next
 })
 
-const THEME_STORAGE = 'fx-scalper-community-theme'
-const theme = ref(localStorage.getItem(THEME_STORAGE) || 'dark')
+const THEME_STORAGE = 'fx-scalper-community-theme-v2'
+const theme = ref(localStorage.getItem(THEME_STORAGE) || 'light')
 watch(
   theme,
   (value) => {
@@ -171,7 +183,7 @@ function settleConfirm(value) {
 const lastUpdated = ref(null)
 const stale = ref(false)
 const refreshKey = ref(0)
-const lastUpdatedLabel = computed(() => (lastUpdated.value ? lastUpdated.value.toLocaleTimeString() : '–'))
+const lastUpdatedLabel = computed(() => formatSastTime(lastUpdated.value))
 let pollTimer = null
 async function pollStatus() {
   if (document.visibilityState !== 'visible' || busy.value || loading.value || confirmState.open) return
@@ -194,6 +206,31 @@ const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
 const autoTrader = computed(() => bootstrapData.value.auto_trader || {})
+const openLiveTrades = computed(() => autoTrader.value.pending_live || [])
+const openTradeCount = computed(() => portfolio.value.length + openLiveTrades.value.length)
+const currentTrade = computed(() => {
+  const live = openLiveTrades.value[0]
+  if (live) {
+    return {
+      kind: 'Real-money trade',
+      symbol: live.symbol || 'Market',
+      direction: live.side || live.contract_type || 'Open',
+      amount: live.stake ?? live.amount,
+      started: live.opened_at || live.created_at || live.start_time,
+    }
+  }
+  const practice = portfolio.value[0]
+  if (practice) {
+    return {
+      kind: 'Practice trade',
+      symbol: practice.symbol || 'Market',
+      direction: practice.side || 'Open',
+      amount: practice.exposure,
+      started: practice.opened_at || practice.created_at || practice.entry_time,
+    }
+  }
+  return null
+})
 const autoPerformance = computed(() => bootstrapData.value.auto_performance || {})
 
 function sparkScale(points, height) {
@@ -273,6 +310,35 @@ function formatRate(value) {
 const lastBrokerStatus = computed(() => bootstrapData.value.last_broker_status || null)
 const setupStatus = computed(() => bootstrapData.value.setup || {})
 const lastScan = computed(() => bootstrapData.value.last_scan || null)
+const scanFailed = computed(() => Boolean(lastScan.value?.errors?.length && !lastScan.value?.scanned))
+const scanStatusMessage = computed(() => {
+  if (!lastScan.value) return 'The bot has not checked the markets yet.'
+  if (scanFailed.value) return 'The price provider is temporarily unavailable. No signals can be created until prices return.'
+  return `Checked ${lastScan.value.scanned || 0} of ${lastScan.value.configured_symbols || 0} markets successfully.`
+})
+const ACTIVITY_LABELS = {
+  AUTO_START: 'Automatic practice started',
+  AUTO_STOP: 'Automatic practice stopped',
+  AUTO_OPEN: 'Practice trade opened',
+  AUTO_CLOSE: 'Practice trade closed',
+  LIVE_OPEN: 'Real-money trade opened',
+  LIVE_SETTLED: 'Real-money trade finished',
+  PAPER_OPEN: 'Practice trade opened',
+  PAPER_CLOSE: 'Practice trade closed',
+}
+function activityLabel(type) {
+  return ACTIVITY_LABELS[type] || String(type || 'Activity').replaceAll('_', ' ').toLowerCase()
+}
+function friendlySystemError(message) {
+  const text = String(message || '')
+  if (/could not connect|handshake status|cloudflare|websocket/i.test(text)) {
+    return 'Current prices are temporarily unavailable from the provider. The bot is waiting safely and will not open a trade without market data.'
+  }
+  return text || 'Something went wrong. Please try again.'
+}
+function friendlyDateTime(value) {
+  return formatSastDateTime(value)
+}
 const liveTradingReady = computed(() => Boolean(setupStatus.value.live_trading_ready))
 const brokerStatusLabel = computed(() => {
   if (lastBrokerStatus.value?.connected) {
@@ -392,8 +458,8 @@ function syncFromBootstrap() {
   settingsForm.max_trades_per_day = Number(settings.max_trades_per_day || 0)
   settingsForm.max_loss_streak = Number(settings.max_loss_streak || 0)
   settingsForm.loss_cooldown_minutes = Number(settings.loss_cooldown_minutes || 0)
-  settingsForm.trading_hours_start = Number(settings.trading_hours_start || 0)
-  settingsForm.trading_hours_end = Number(settings.trading_hours_end || 0)
+  settingsForm.trading_hours_start = utcHourToSast(settings.trading_hours_start)
+  settingsForm.trading_hours_end = utcHourToSast(settings.trading_hours_end)
   settingsForm.max_open_positions = Number(settings.max_open_positions || 6)
   settingsForm.live_trade_stake = Number(settings.live_trade_stake || 1)
   settingsForm.live_trade_currency = settings.live_trade_currency || 'USD'
@@ -526,8 +592,8 @@ async function saveSettings() {
         max_trades_per_day: Number(settingsForm.max_trades_per_day),
         max_loss_streak: Number(settingsForm.max_loss_streak),
         loss_cooldown_minutes: Number(settingsForm.loss_cooldown_minutes),
-        trading_hours_start: Number(settingsForm.trading_hours_start),
-        trading_hours_end: Number(settingsForm.trading_hours_end),
+        trading_hours_start: sastHourToUtc(settingsForm.trading_hours_start),
+        trading_hours_end: sastHourToUtc(settingsForm.trading_hours_end),
         max_open_positions: settingsForm.max_open_positions,
         live_trade_stake: Number(settingsForm.live_trade_stake),
         live_trade_currency: settingsForm.live_trade_currency,
@@ -649,20 +715,22 @@ onMounted(fetchBootstrap)
   <main class="page-shell">
     <header class="topbar card">
       <div class="brand">
-        <div class="eyebrow">Community Edition · paper-first</div>
-        <h1>FX Scalper</h1>
+        <div class="eyebrow">Beginner-friendly practice</div>
+        <h1>Market Guide</h1>
       </div>
       <div class="status-pills" aria-live="polite">
-        <span class="pill" :class="{ 'pill-on': autoTrader.running }">Auto {{ autoTrader.running ? autoTrader.mode : 'off' }}</span>
-        <span class="pill">{{ bootstrapData.settings?.market_source || 'deriv' }} data</span>
+        <span class="pill" :class="{ 'pill-on': autoTrader.running && !scanFailed, 'pill-warn': autoTrader.running && scanFailed }">
+          Automatic trading: {{ autoTrader.running ? (scanFailed ? 'waiting for prices' : 'on') : 'off' }}
+        </span>
+        <span class="pill">Market information: {{ bootstrapData.settings?.market_source || 'Deriv' }}</span>
         <span class="pill" :class="{ 'pill-danger': binanceMainnet }">{{ networkLabel }}</span>
-        <span class="pill" :class="{ 'pill-warn': stale }" :title="stale ? 'Last refresh failed' : 'Refreshes every 10s'">
-          {{ stale ? 'Stale' : 'Updated' }} {{ lastUpdatedLabel }}
+        <span class="pill" :class="{ 'pill-warn': stale }" :title="stale ? 'The latest update did not work' : 'Updates every 10 seconds'">
+          {{ stale ? 'Information may be out of date' : 'Information is up to date' }} · {{ lastUpdatedLabel }}
         </span>
       </div>
       <div class="topbar-actions">
-        <button v-if="autoTrader.running" class="button danger" :disabled="busy" @click="stopAuto">Stop auto</button>
-        <button class="button secondary" :disabled="busy" @click="loadDemo">Try demo data</button>
+        <button v-if="autoTrader.running" class="button danger" :disabled="busy" @click="stopAuto">Stop automatic trading</button>
+        <button class="button secondary" :disabled="busy" @click="loadDemo">Use sample data</button>
         <button
           class="button secondary icon-button"
           type="button"
@@ -673,86 +741,135 @@ onMounted(fetchBootstrap)
         </button>
       </div>
     </header>
-    <nav class="tabs" role="tablist" aria-label="Sections">
+    <nav class="tabs" aria-label="Main navigation">
       <button
-        v-for="[id, label] in TABS"
-        :key="id"
+        v-for="item in TABS"
+        :key="item.id"
         class="tab"
-        :class="{ active: tab === id }"
-        role="tab"
+        :class="{ active: tab === item.id }"
         type="button"
-        :aria-selected="tab === id"
-        @click="tab = id"
+        :aria-current="tab === item.id ? 'page' : undefined"
+        @click="tab = item.id"
       >
-        {{ label }}
+        <span class="tab-icon" aria-hidden="true">{{ item.icon }}</span>
+        <span>{{ item.label }}</span>
       </button>
     </nav>
+
+    <aside class="page-helper" aria-live="polite">
+      <div class="helper-heading">
+        <div>
+          <span class="helper-kicker">You are here</span>
+          <h2>{{ currentTabHelp.title }}</h2>
+        </div>
+        <button class="helper-toggle" type="button" :aria-expanded="showPageHelp" @click="showPageHelp = !showPageHelp">
+          {{ showPageHelp ? 'Hide help' : 'Show help' }}
+        </button>
+      </div>
+      <template v-if="showPageHelp">
+        <p>{{ currentTabHelp.text }}</p>
+        <div class="helper-tip"><strong>Helpful to know:</strong> {{ currentTabHelp.tip }}</div>
+      </template>
+    </aside>
+
+    <section
+      v-if="tab === 'dashboard' || tab === 'trade'"
+      class="trade-status"
+      :class="{ 'trade-status-running': currentTrade }"
+      aria-live="polite"
+    >
+      <div class="trade-status-icon" aria-hidden="true">
+        <span v-if="currentTrade" class="status-pulse"></span>
+        <span v-else>✓</span>
+      </div>
+      <div class="trade-status-copy">
+        <span class="trade-status-label">Trade status</span>
+        <template v-if="currentTrade">
+          <h2>{{ currentTrade.kind }} is running</h2>
+          <p>
+            {{ currentTrade.symbol }} · {{ currentTrade.direction }}
+            <template v-if="currentTrade.amount !== undefined"> · {{ formatCurrency(currentTrade.amount) }}</template>
+            <template v-if="currentTrade.started"> · started {{ friendlyDateTime(currentTrade.started) }}</template>
+          </p>
+          <small v-if="openTradeCount > 1">You have {{ openTradeCount }} open trades in total.</small>
+        </template>
+        <template v-else>
+          <h2>No trade is running</h2>
+          <p>Your money is not currently in a trade. Start with a practice trade when you feel ready.</p>
+        </template>
+      </div>
+      <button class="button secondary trade-status-action" type="button" @click="tab = currentTrade ? 'dashboard' : 'trade'">
+        {{ currentTrade ? 'View open trade' : 'Start a practice trade' }}
+      </button>
+    </section>
 
     <section v-show="tab === 'dashboard'" class="hero-panel">
       <div class="stats-grid">
         <article class="card stat-card">
-          <div class="stat-label">Open Signals</div>
+          <div class="stat-label">Possible trades found</div>
           <div class="stat-value">{{ stats.signal_count || 0 }}</div>
         </article>
         <article class="card stat-card">
-          <div class="stat-label">Open Positions</div>
+          <div class="stat-label">Trades currently open</div>
           <div class="stat-value">{{ stats.open_positions || 0 }}</div>
         </article>
         <article class="card stat-card">
-          <div class="stat-label">Portfolio Exposure</div>
+          <div class="stat-label">Money currently in trades</div>
           <div class="stat-value stat-value-sm">{{ portfolioExposureLabel }}</div>
         </article>
         <article class="card stat-card">
-          <div class="stat-label">Rebalance Drift</div>
+          <div class="stat-label">Portfolio change needed</div>
           <div class="stat-value">{{ rebalanceDriftLabel }}</div>
         </article>
         <article class="card stat-card">
-          <div class="stat-label">Backtest Pass Rate</div>
+          <div class="stat-label">Strategy test results</div>
           <div class="stat-value stat-value-sm">{{ passRateLabel }}</div>
         </article>
       </div>
 
 
       <div class="actions">
-        <button class="button" :disabled="busy" @click="runBacktests">Run Backtests</button>
+        <button class="button" :disabled="busy" @click="runBacktests">Test the strategy</button>
         <button class="button secondary" :disabled="busy" @click="applyRebalance">
-          Apply Rebalance
+          Apply suggested portfolio changes
         </button>
-        <button class="button secondary" :disabled="busy" @click="scanMarket">Scan Market</button>
-        <button class="button secondary" :disabled="busy" @click="resetDemo">Reset Demo</button>
+        <button class="button secondary" :disabled="busy" @click="scanMarket">Look for opportunities</button>
+        <button class="button secondary" :disabled="busy" @click="resetDemo">Start practice again</button>
       </div>
 
       <div class="card section-card">
         <div class="section-head">
-          <h2>Auto-Trader</h2>
+          <h2>Automatic trading</h2>
           <p>
-            Scans every {{ settingsForm.auto_scan_interval_seconds }}s and acts on signals in the allowed direction.
-            Stops opening trades for the day when a daily limit is hit. Stop is the kill switch.
+            When switched on, the app looks for opportunities every {{ settingsForm.auto_scan_interval_seconds }} seconds
+            and follows your safety limits. You can stop it at any time.
           </p>
         </div>
         <div class="section-body stack-list">
           <div class="item-row">
             <div class="item-title">
-              {{ autoTrader.running ? `Running (${autoTrader.mode})` : 'Stopped' }}
+              {{ autoTrader.running ? (scanFailed ? 'Waiting for current prices' : `Running (${autoTrader.mode})`) : 'Stopped' }}
             </div>
             <div class="actions">
-              <button class="button" :disabled="busy || autoTrader.running" @click="startAuto('paper')">Start Paper</button>
-              <button class="button secondary" :disabled="busy || autoTrader.running" @click="startAuto('live')">Start Live</button>
+              <button class="button" :disabled="busy || autoTrader.running || scanFailed" @click="startAuto('paper')">Start practice automation</button>
+              <button class="button secondary" :disabled="busy || autoTrader.running || scanFailed" @click="startAuto('live')">Start real-money automation</button>
               <button class="button secondary" :disabled="busy || !autoTrader.running" @click="stopAuto">Stop</button>
             </div>
           </div>
           <div class="item-row">
-            <span>Today {{ autoTrader.day || '–' }}: {{ formatCurrency(autoTrader.realized_pnl || 0) }} realized</span>
-            <span>{{ autoTrader.trades_today || 0 }} trades · {{ (autoTrader.pending_live || []).length }} live pending</span>
+            <span>Today’s result: {{ formatCurrency(autoTrader.realized_pnl || 0) }}</span>
+            <span>{{ autoTrader.trades_today || 0 }} trades today · {{ (autoTrader.pending_live || []).length }} real-money trades waiting</span>
           </div>
           <div v-for="item in autoTrader.pending_live || []" :key="`pl-${item.ref}`" class="item-row">
             <span>{{ item.symbol }} {{ item.side }} · {{ formatCurrency(item.stake) }} · ref {{ item.ref }}</span>
             <button v-if="item.position" class="button secondary" :disabled="busy" @click="closeLivePosition(item.ref)">Sell now</button>
           </div>
           <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
-          <div v-if="autoTrader.last_error" class="note">Last error: {{ autoTrader.last_error }}</div>
+          <div v-if="autoTrader.last_error" class="status-banner error">
+            <strong>Prices unavailable</strong><br />{{ friendlySystemError(autoTrader.last_error) }}
+          </div>
           <div v-if="autoTrader.paused_reason" class="note">Paused: {{ autoTrader.paused_reason }}</div>
-          <div class="kv">Last tick {{ autoTrader.last_tick || 'never' }} · loss streak {{ autoTrader.loss_streak || 0 }}</div>
+          <div class="kv">Last checked: {{ friendlyDateTime(autoTrader.last_tick) }} · consecutive losing trades: {{ autoTrader.loss_streak || 0 }}</div>
           <div v-if="autoPerformance.trades" class="item-card">
             <div class="item-row">
               <div class="item-title">Performance (last {{ autoPerformance.trades }} closed trades)</div>
@@ -772,37 +889,37 @@ onMounted(fetchBootstrap)
 
       <div class="card section-card">
         <div class="section-head">
-          <h2>Setup Checklist</h2>
-          <p>{{ setupStatus.recommended_next_step || 'Review the configuration before trading.' }}</p>
+          <h2>Is everything ready?</h2>
+          <p>{{ scanFailed ? 'Your setup is saved, but live prices are temporarily unavailable.' : (setupStatus.recommended_next_step || 'Review the setup before trading.') }}</p>
         </div>
         <div class="section-body">
           <div class="stack-list">
             <div class="item-row">
-              <span>{{ brokerName === 'binance' ? 'Binance API keys' : 'Deriv credentials' }}</span>
-              <span class="kv">{{ setupStatus.broker_configured ? 'Configured' : 'Missing' }}</span>
+              <span>Trading account connection</span>
+              <span class="kv">{{ setupStatus.broker_configured ? 'Ready' : 'Needs setup' }}</span>
             </div>
             <div class="item-row">
-              <span>Configured symbols</span>
-              <span class="kv">{{ setupStatus.symbols_configured ? 'Ready' : 'Missing' }}</span>
+              <span>Markets to watch</span>
+              <span class="kv">{{ setupStatus.symbols_configured ? 'Ready' : 'Choose markets' }}</span>
             </div>
             <div class="item-row">
-              <span>Market snapshots</span>
-              <span class="kv">{{ setupStatus.market_snapshots_configured ? 'Ready' : 'Missing' }}</span>
+              <span>Current market prices</span>
+              <span class="kv">{{ setupStatus.market_snapshots_configured ? 'Ready' : scanFailed ? 'Provider unavailable' : 'Waiting for data' }}</span>
             </div>
             <div class="item-row">
-              <span>Paper-trading flow</span>
-              <span class="kv">{{ setupStatus.paper_trading_ready ? 'Available' : 'Blocked' }}</span>
+              <span>Practice trading</span>
+              <span class="kv">{{ setupStatus.paper_trading_ready && !scanFailed ? 'Ready' : scanFailed ? 'Waiting for prices' : 'Needs setup' }}</span>
             </div>
             <div class="item-row">
-              <span>Live trading enabled</span>
-              <span class="kv">{{ settingsForm.live_trading_enabled ? 'Yes' : 'No' }}</span>
+              <span>Real-money trading</span>
+              <span class="kv">{{ settingsForm.live_trading_enabled ? 'Enabled' : 'Safely off' }}</span>
             </div>
             <div class="item-row">
-              <span>Live-trading flow</span>
-              <span class="kv">{{ setupStatus.live_trading_ready ? 'Ready' : 'Blocked' }}</span>
+              <span>Real-money trading readiness</span>
+              <span class="kv">{{ setupStatus.live_trading_ready && !scanFailed ? 'Ready' : 'Not ready' }}</span>
             </div>
             <div class="item-row">
-              <span>Broker status</span>
+              <span>Trading account status</span>
               <span class="kv">{{ brokerStatusLabel }}</span>
             </div>
           </div>
@@ -983,12 +1100,12 @@ onMounted(fetchBootstrap)
                 <input v-model.number="settingsForm.loss_cooldown_minutes" class="input" type="number" min="0" max="1440" />
               </div>
               <div class="field">
-                <label>Trade From (UTC hour)</label>
+                <label>Trade from (South African hour)</label>
                 <input v-model.number="settingsForm.trading_hours_start" class="input" type="number" min="0" max="23" />
               </div>
               <div class="field">
-                <label>Trade Until (UTC hour, same = all day)</label>
-                <input v-model.number="settingsForm.trading_hours_end" class="input" type="number" min="0" max="24" />
+                <label>Trade until (South African hour, same = all day)</label>
+                <input v-model.number="settingsForm.trading_hours_end" class="input" type="number" min="0" max="23" />
               </div>
               <div class="field">
                 <label>Rebalance Tolerance %</label>
@@ -1069,15 +1186,28 @@ onMounted(fetchBootstrap)
               />
             </div>
 
-            <div class="field">
-              <label>Market Snapshots JSON</label>
-              <textarea
-                v-model="marketSnapshotsJson"
-                class="textarea code-block"
-                spellcheck="false"
-                placeholder='[{"symbol":"frxEURUSD","price":1.0865,"ema_fast":1.0862,"ema_slow":1.0851,"adx":22,"rsi":55,"atr_ratio":1.04,"price_vs_vwap":"above","candle_quality":"clean","distance_to_band":0.45}]'
-              />
+            <div class="market-data-status" :class="{ 'market-data-ready': market.length, 'market-data-error': !market.length && lastScan?.errors?.length }">
+              <div>
+                <strong>{{ market.length ? 'Market information is ready' : lastScan?.errors?.length ? 'Market information could not be loaded' : 'Waiting for market information' }}</strong>
+                <p v-if="market.length">The bot has current information for {{ market.length }} market{{ market.length === 1 ? '' : 's' }} and can look for opportunities.</p>
+                <p v-else-if="lastScan?.errors?.length">The provider did not return prices. Your settings are saved and safe. Try “Look for opportunities” again in a moment.</p>
+                <p v-else>Add at least one market, save your setup, then ask the bot to look for opportunities.</p>
+              </div>
             </div>
+
+            <details class="advanced-options">
+              <summary>Advanced: generated market data</summary>
+              <div class="field">
+                <label>Market data used by the strategy</label>
+                <textarea
+                  v-model="marketSnapshotsJson"
+                  class="textarea code-block"
+                  spellcheck="false"
+                  placeholder="Generated automatically after a successful market scan"
+                />
+                <small class="field-help">You normally do not need to edit this. An empty [] means the provider has not returned prices yet.</small>
+              </div>
+            </details>
 
             <div class="actions">
               <button class="button" :disabled="busy" @click="saveSettings">Save Settings</button>
@@ -1086,7 +1216,7 @@ onMounted(fetchBootstrap)
                 :disabled="busy || !symbols.length"
                 @click="scanMarket"
               >
-                Scan Market Now
+                Look for opportunities now
               </button>
             </div>
           </div>
@@ -1110,7 +1240,7 @@ onMounted(fetchBootstrap)
               </div>
               <div class="item-row">
                 <span class="muted">Last checked</span>
-                <span class="kv">{{ lastBrokerStatus?.checked_at || 'Never' }}</span>
+                <span class="kv">{{ friendlyDateTime(lastBrokerStatus?.checked_at) }}</span>
               </div>
               <div class="item-row">
                 <span class="muted">Token mode</span>
@@ -1268,16 +1398,13 @@ onMounted(fetchBootstrap)
       <section class="tab-section">
         <article v-show="tab === 'dashboard'" class="card section-card">
           <div class="section-head">
-            <h2>Signal Feed</h2>
-            <p>Each saved market snapshot is evaluated with the simplified public rule stack.</p>
-            <p v-if="lastScan" class="note">
-              Last scan {{ lastScan.at }} · source {{ lastScan.source }} ·
-              {{ lastScan.scanned }}/{{ lastScan.configured_symbols }} symbol(s) ·
-              {{ (lastScan.errors || []).length }} error(s)
-            </p>
-            <p v-if="lastScan && lastScan.errors && lastScan.errors.length" class="note">
-              {{ lastScan.errors.map((item) => item.symbol + ': ' + item.error).join(' | ') }}
-            </p>
+            <h2>Trade suggestions</h2>
+            <p>The bot checks current prices and explains whether buying, selling, or waiting may be appropriate.</p>
+            <div v-if="lastScan" class="scan-summary" :class="{ 'scan-summary-error': scanFailed }">
+              <strong>{{ scanFailed ? 'Prices are temporarily unavailable' : 'Market check complete' }}</strong>
+              <span>{{ scanStatusMessage }}</span>
+              <button v-if="scanFailed" class="button secondary" type="button" :disabled="busy" @click="scanMarket">Try again</button>
+            </div>
           </div>
           <div class="section-body grid-cards">
             <div v-for="row in market" :key="row.symbol" class="item-card">
@@ -1305,8 +1432,23 @@ onMounted(fetchBootstrap)
                   <span class="metric-label">VWAP</span>
                   <span class="metric-value">{{ row.price_vs_vwap }}</span>
                 </div>
+                <div class="metric">
+                  <span class="metric-label">Suggested stop loss</span>
+                  <span class="metric-value">{{ row.stop_loss ?? '—' }}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Suggested take profit</span>
+                  <span class="metric-value">{{ row.take_profit ?? '—' }}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Reward / risk</span>
+                  <span class="metric-value">{{ row.risk_reward_ratio ? `${row.risk_reward_ratio}:1` : '—' }}</span>
+                </div>
               </div>
               <p class="note">{{ row.reason }}</p>
+              <p v-if="row.exit_recommendation_basis" class="note muted">
+                {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
+              </p>
               <div class="actions">
                 <button
                   class="button secondary"
@@ -1325,8 +1467,7 @@ onMounted(fetchBootstrap)
               </div>
             </div>
             <div v-if="!market.length" class="empty-state">
-              No market snapshots yet. Add symbols in Settings, then press Scan Market Now to read
-              candles and generate signals. You can also paste snapshot JSON in Settings by hand.
+              {{ scanFailed ? 'No suggestions can be created without current prices. Try again when the provider is available.' : 'Choose markets in Setup, then select “Look for opportunities”.' }}
             </div>
           </div>
         </article>
@@ -1436,59 +1577,88 @@ onMounted(fetchBootstrap)
 
         <article v-show="tab === 'backtest'" class="card section-card">
           <div class="section-head">
-            <h2>Backtests</h2>
-            <p>
-              Walk-forward replay of the live rules over real candles: enter at the next open, exit after a fixed
-              number of bars. Raw price moves, plus optional payout scoring and exchange fees (Binance defaults to 0.1% per side).
-              Spreads and slippage are not modelled.
+            <h2>Test the strategy with past market data</h2>
+            <p class="beginner-intro">
+              This is a practice run. It checks what might have happened if the app had used its strategy in the
+              past. It does not place a real trade, and good past results do not guarantee future profit.
             </p>
-            <div class="item-row">
-              <label>Exit after (bars) <input v-model.number="backtestOptions.horizon_bars" type="number" min="1" max="100" /></label>
-              <label>Candles <input v-model.number="backtestOptions.candle_count" type="number" min="150" max="5000" /></label>
-              <label>Payout % (0 = off) <input v-model.number="backtestOptions.payout_pct" type="number" min="0" max="500" /></label>
-              <label>Fee % per side <input v-model.number="backtestOptions.fee_pct" type="number" min="0" max="5" step="0.01" placeholder="auto" /></label>
+            <div class="form-grid backtest-options">
+              <div class="field">
+                <label>How long should each practice trade stay open?</label>
+                <select v-model.number="backtestOptions.horizon_bars" class="select">
+                  <option :value="1">Very short</option>
+                  <option :value="5">Short</option>
+                  <option :value="10">Medium</option>
+                  <option :value="20">Longer</option>
+                </select>
+                <small class="field-help">The app currently checks {{ backtestOptions.horizon_bars }} market periods before closing.</small>
+              </div>
+              <div class="field">
+                <label>How much history should we test?</label>
+                <select v-model.number="backtestOptions.candle_count" class="select">
+                  <option :value="250">A little</option>
+                  <option :value="500">A normal amount</option>
+                  <option :value="1000">A lot</option>
+                  <option :value="2500">A very large amount</option>
+                </select>
+                <small class="field-help">More history takes longer but gives the strategy more situations to try.</small>
+              </div>
             </div>
+            <details class="advanced-options">
+              <summary>Advanced cost settings</summary>
+              <div class="form-grid">
+                <div class="field">
+                  <label>Broker payout percentage</label>
+                  <input v-model.number="backtestOptions.payout_pct" class="input" type="number" min="0" max="500" />
+                  <small class="field-help">Leave at 0 if you do not use fixed-payout trades.</small>
+                </div>
+                <div class="field">
+                  <label>Trading fee percentage</label>
+                  <input v-model.number="backtestOptions.fee_pct" class="input" type="number" min="0" max="5" step="0.01" placeholder="Detected automatically" />
+                  <small class="field-help">The amount a broker charges when buying or selling.</small>
+                </div>
+              </div>
+            </details>
           </div>
           <div class="section-body">
             <div v-if="lastBacktest" class="stack-list">
               <div class="item-card">
                 <div class="item-row">
-                  <div class="item-title">Last Run</div>
-                  <div class="kv">{{ lastBacktest.run_at }}</div>
+                  <div class="item-title">Latest practice run</div>
+                  <div class="kv">{{ friendlyDateTime(lastBacktest.run_at) }}</div>
                 </div>
                 <div v-if="candleBacktest" class="item-row">
-                  <div class="item-title">Candle Backtest</div>
+                  <div class="item-title">Trades the strategy tried</div>
                   <div class="kv">
-                    {{ candleBacktest.trades || 0 }} trades · win {{ formatRate(candleBacktest.win_rate) }} ·
-                    {{ candleBacktest.source }} {{ candleBacktest.granularity }}s
+                    {{ candleBacktest.trades || 0 }} practice trades · {{ formatRate(candleBacktest.win_rate) }} ended positively
                   </div>
                 </div>
                 <div class="item-row">
-                  <div class="item-title">Rule Self-checks</div>
+                  <div class="item-title">Safety checks passed</div>
                   <div class="kv">{{ lastBacktest.scenario_passes }} / {{ lastBacktest.scenario_total }}</div>
                 </div>
                 <div class="item-row">
-                  <div class="item-title">Rebalance Check</div>
-                  <div class="kv">{{ lastBacktest.rebalance_check?.action_count || 0 }} actions</div>
+                  <div class="item-title">Suggested portfolio changes</div>
+                  <div class="kv">{{ lastBacktest.rebalance_check?.action_count || 0 }} suggestions</div>
                 </div>
               </div>
 
               <div v-for="row in candleBacktest?.results || []" :key="`bt-${row.symbol}`" class="item-card">
                 <div v-if="row.fee_pct" class="kv">
-                  Net of {{ row.fee_pct }}%/side fees: {{ row.total_net_return_pct }}% total · win
-                  {{ formatRate(row.net_win_rate) }} · max DD {{ row.max_net_drawdown_pct }}%
+                  After estimated fees: {{ row.total_net_return_pct }}% total result ·
+                  {{ formatRate(row.net_win_rate) }} of trades ended positively · largest drop {{ row.max_net_drawdown_pct }}%
                 </div>
                 <div class="item-row">
                   <div class="item-title">{{ row.symbol }}</div>
-                  <div class="kv">{{ row.trades }} trades · win {{ formatRate(row.win_rate) }}</div>
+                  <div class="kv">{{ row.trades }} practice trades · {{ formatRate(row.win_rate) }} ended positively</div>
                 </div>
                 <div class="item-row">
-                  <span class="muted">Total {{ row.total_return_pct }}% · max DD {{ row.max_drawdown_pct }}%</span>
-                  <span class="muted">{{ row.bars_evaluated }} bars over {{ row.candles }} candles</span>
+                  <span class="muted">Overall result {{ row.total_return_pct }}% · largest drop {{ row.max_drawdown_pct }}%</span>
+                  <span class="muted">Tested {{ row.candles }} past market periods</span>
                 </div>
                 <div v-if="row.payout" class="item-row">
                   <span class="muted">At {{ Math.round(row.payout * 100) }}% payout: {{ row.net_per_stake >= 0 ? '+' : '' }}{{ row.net_per_stake }} per $1 staked</span>
-                  <span class="muted">break-even win rate {{ formatRate(row.break_even_win_rate) }}</span>
+                  <span class="muted">Needs {{ formatRate(row.break_even_win_rate) }} positive trades to avoid a loss</span>
                 </div>
                 <svg v-if="(row.equity_curve || []).length > 1" viewBox="0 0 240 48" preserveAspectRatio="none" style="width: 100%; height: 48px" role="img" :aria-label="`${row.symbol} equity curve`">
                   <line x1="0" x2="240" :y1="zeroLine(row.equity_curve)" :y2="zeroLine(row.equity_curve)" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 4" />
@@ -1517,7 +1687,7 @@ onMounted(fetchBootstrap)
                 <div class="note">{{ result.reason }}</div>
               </div>
             </div>
-            <div v-else class="empty-state">Run backtests to generate the latest scenario report.</div>
+            <div v-else class="empty-state">No practice test yet. Select your options, then choose “Test the strategy”.</div>
           </div>
         </article>
       </section>
@@ -1525,8 +1695,8 @@ onMounted(fetchBootstrap)
       <section class="tab-section">
         <article v-show="tab === 'backtest'" class="card section-card">
           <div class="section-head">
-            <h2>Rule Registry</h2>
-            <p>Public documentation for the simplified rule stack shipped in the community repo.</p>
+          <h2>How the strategy makes decisions</h2>
+          <p>These are the checks the app uses before suggesting a trade.</p>
           </div>
           <div class="section-body stack-list">
             <div v-for="rule in rules" :key="rule.id" class="item-card">
@@ -1548,12 +1718,12 @@ onMounted(fetchBootstrap)
           <div class="section-body stack-list">
             <div v-for="entry in tradeHistory" :key="`${entry.timestamp}-${entry.symbol}-${entry.type}`" class="item-card">
               <div class="item-row">
-                <div class="item-title">{{ entry.type }}</div>
-                <div class="kv">{{ entry.timestamp }}</div>
+                <div class="item-title">{{ activityLabel(entry.type) }}</div>
+                <div class="kv">{{ friendlyDateTime(entry.timestamp) }}</div>
               </div>
               <div class="item-row">
-                <span>{{ entry.symbol || 'SYSTEM' }}</span>
-                <span>{{ entry.side || 'N/A' }}</span>
+                <span>{{ entry.symbol || 'App activity' }}</span>
+                <span>{{ entry.side || 'No direction' }}</span>
               </div>
               <div class="item-row">
                 <span>{{ formatCurrency(entry.exposure) }}</span>

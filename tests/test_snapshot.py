@@ -104,6 +104,8 @@ def test_a_trending_series_drives_the_engine_to_a_buy(make_candles):
     assert decision["regime"] == "TRENDING"
     assert decision["decision"] == "BUY"
     assert decision["reason"]
+    assert decision["stop_loss"] < decision["price"] < decision["take_profit"]
+    assert decision["risk_reward_ratio"] == pytest.approx(2.0)
 
 
 def test_a_falling_series_drives_the_engine_to_a_sell(make_candles):
@@ -114,6 +116,8 @@ def test_a_falling_series_drives_the_engine_to_a_sell(make_candles):
     decision = evaluate_snapshot(dict(snapshot), BALANCED)
     assert decision["regime"] == "TRENDING"
     assert decision["decision"] == "SELL"
+    assert decision["take_profit"] < decision["price"] < decision["stop_loss"]
+    assert decision["risk_reward_ratio"] == pytest.approx(2.0)
 
 
 def test_build_market_snapshots_uses_the_provider(make_candles):

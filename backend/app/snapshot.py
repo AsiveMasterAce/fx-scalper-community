@@ -35,6 +35,7 @@ SNAPSHOT_KEYS = (
     "ema_slow",
     "adx",
     "rsi",
+    "atr",
     "atr_ratio",
     "price_vs_vwap",
     "candle_quality",
@@ -183,7 +184,7 @@ def build_snapshot(
     values = compute_indicators(candles, config)
     cold = [
         name
-        for name in ("ema_fast", "ema_slow", "rsi", "adx", "vwap", "atr_ratio", "distance_to_band")
+        for name in ("ema_fast", "ema_slow", "rsi", "atr", "adx", "vwap", "atr_ratio", "distance_to_band")
         if values.get(name) is None
     ]
     if cold:
@@ -200,6 +201,7 @@ def build_snapshot(
         "ema_slow": round(float(values["ema_slow"]), 5),
         "adx": round(float(values["adx"]), 2),
         "rsi": round(float(values["rsi"]), 2),
+        "atr": round(float(values["atr"]), 5),
         "atr_ratio": round(float(values["atr_ratio"]), 4),
         "price_vs_vwap": "above" if price >= vwap_value else "below",
         "candle_quality": str(values["candle_quality"]),

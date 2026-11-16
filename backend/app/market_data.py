@@ -34,7 +34,11 @@ from typing import Dict, List, Mapping, Optional
 import requests
 import websocket
 
-DEFAULT_WS_URL = "wss://ws.derivws.com/websockets/v3"
+# Deriv moved public market data from the legacy app-id endpoint to this
+# unauthenticated Options API endpoint. Keep migration logic in the provider so
+# existing saved settings continue to work without user intervention.
+DEFAULT_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
+LEGACY_WS_URL = "wss://ws.derivws.com/websockets/v3"
 DEFAULT_APP_ID = "1089"
 DEFAULT_GRANULARITY = 300
 DEFAULT_COUNT = 200
@@ -175,6 +179,8 @@ class DerivCandleProvider(CandleProvider):
     ) -> None:
         self.app_id = str(app_id or DEFAULT_APP_ID).strip() or DEFAULT_APP_ID
         self.ws_url = str(ws_url or DEFAULT_WS_URL).strip() or DEFAULT_WS_URL
+        if self.ws_url.rstrip("/") == LEGACY_WS_URL:
+            self.ws_url = DEFAULT_WS_URL
         self.token = str(token).strip() if token else None
         self.timeout = float(timeout)
         self.url = _with_app_id(self.ws_url, self.app_id)
