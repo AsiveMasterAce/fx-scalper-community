@@ -218,6 +218,7 @@ DEFAULT_STATE = {
         "auto_scan_interval_seconds": 300,
         "auto_hold_minutes": 25,
         "auto_paper_exposure": 100.0,
+        "paper_starting_balance": 10000.0,
     },
     "portfolio": [],
     "trade_history": [],
@@ -1046,6 +1047,16 @@ def bootstrap_payload(state: dict) -> dict:
         state.get("portfolio", []),
         settings.get("rebalance_key_mode", "asset_class"),
     )
+    auto = state.get("auto_trader") or default_auto_state()
+    starting_balance = float(settings.get("paper_starting_balance", 10000.0) or 10000.0)
+    realized_pnl = round(sum(float(row.get("pnl") or 0.0) for row in auto.get("closed_trades", [])), 2)
+    unrealized_pnl = round(
+        sum(
+            paper_pnl(position, float(position.get("current_price") or position["entry_price"]))
+            for position in state.get("portfolio", [])
+        ),
+        2,
+    )
     return {
         "settings": public_settings(settings),
         "market": market,
@@ -1057,8 +1068,8 @@ def bootstrap_payload(state: dict) -> dict:
         "last_backtest": state.get("last_backtest"),
         "last_broker_status": state.get("last_broker_status"),
         "last_scan": state.get("last_scan"),
-        "auto_trader": state.get("auto_trader") or default_auto_state(),
-        "auto_performance": performance((state.get("auto_trader") or {}).get("closed_trades") or []),
+        "auto_trader": auto,
+        "auto_performance": performance(auto.get("closed_trades") or []),
         "symbols": normalize_symbols(settings.get("symbols", [])),
         "setup": setup_status(settings, market),
         "stats": {
@@ -1066,6 +1077,10 @@ def bootstrap_payload(state: dict) -> dict:
             "signal_count": count_open_signals(market),
             "open_positions": len(state.get("portfolio", [])),
             "total_exposure": round(total_exposure, 2),
+            "paper_starting_balance": round(starting_balance, 2),
+            "paper_realized_pnl": realized_pnl,
+            "paper_unrealized_pnl": unrealized_pnl,
+            "paper_equity": round(starting_balance + realized_pnl + unrealized_pnl, 2),
             "current_weights": {key: round(value, 4) for key, value in current_weights.items()},
         },
     }
@@ -1077,6 +1092,7 @@ AUTO_NUMBER_SETTINGS = (
     ("auto_scan_interval_seconds", 300, 30, 3600),
     ("auto_hold_minutes", 25, 1, 1440),
     ("auto_paper_exposure", 100.0, 1.0, 1e9),
+    ("paper_starting_balance", 10000.0, 1.0, 1e9),
     ("max_trades_per_day", 0, 0, 1000),
     ("max_loss_streak", 0, 0, 100),
     ("loss_cooldown_minutes", 0, 0, 1440),
@@ -1575,13 +1591,21 @@ def paper_trade_rebalance():
     if not state.get("settings", {}).get("rebalance_enabled", True):
         return error_response("Rebalancing is disabled in settings.", 400)
     plan = build_rebalance_plan(state)
+    prices = {row["symbol"]: float(row["price"]) for row in configured_market_snapshots(state["settings"])}
     closed = []
     for action in plan["actions"]:
         if action["action"] != "CLOSE_POSITION" or not action.get("position_id"):
             continue
         for index, position in enumerate(list(state.get("portfolio", []))):
             if str(position.get("id")) == action["position_id"]:
+                close_price = prices.get(position["symbol"], float(position.get("current_price") or position["entry_price"]))
+                pnl = paper_pnl(position, close_price)
                 state["portfolio"].pop(index)
+                if position.get("auto"):
+                    record_close(
+                        state["auto_trader"], state["settings"], symbol=position["symbol"],
+                        side=position["side"], pnl=pnl, now=utcnow(), mode="paper",
+                    )
                 record_event(
                     state,
                     {
@@ -1590,7 +1614,7 @@ def paper_trade_rebalance():
                         "symbol": position["symbol"],
                         "side": position["side"],
                         "exposure": position["exposure"],
-                        "note": action["reason"],
+                        "note": f"{action['reason']} Closed at {close_price}. P&L {pnl:+.2f}.",
                     },
                 )
                 closed.append(position)

@@ -72,6 +72,7 @@ const settingsForm = reactive({
   auto_scan_interval_seconds: 300,
   auto_hold_minutes: 25,
   auto_paper_exposure: 100,
+  paper_starting_balance: 10000,
   max_trades_per_day: 0,
   max_loss_streak: 0,
   loss_cooldown_minutes: 0,
@@ -125,6 +126,7 @@ const liveOrderResult = ref(null)
 
 const TABS = [
   { id: 'dashboard', label: 'Home', icon: '⌂' },
+  { id: 'signals', label: 'Signals & trades', icon: '↗' },
   { id: 'trade', label: 'Practice trade', icon: '▶' },
   { id: 'journal', label: 'My activity', icon: '☷' },
   { id: 'backtest', label: 'Test strategy', icon: '✓' },
@@ -132,6 +134,7 @@ const TABS = [
 ]
 const TAB_HELP = {
   dashboard: { title: 'Your starting point', text: 'See what the app is doing and whether anything needs your attention.', tip: 'New here? Use sample data, then visit Practice trade. No real money is used unless you deliberately enable live trading.' },
+  signals: { title: 'Suggestions and trades', text: 'Review current signals and recent trade activity without the rest of the dashboard.', tip: 'Use View when you want the full entry, stop-loss, take-profit, and cancellation guidance.' },
   trade: { title: 'Practice without risking money', text: 'Try opening and closing a pretend trade so you can learn how the process works.', tip: 'A “buy” expects the price to rise. A “sell” expects it to fall. The amount at risk is shown before you continue.' },
   journal: { title: 'Review what happened', text: 'See your previous practice and live trades in one place.', tip: 'Look for patterns over many trades. One win or loss does not tell you whether a strategy is reliable.' },
   backtest: { title: 'Try the strategy on past data', text: 'Run a safe simulation to see how the strategy might have behaved before today.', tip: 'Past results are useful for learning, but they cannot predict or guarantee future results.' },
@@ -141,6 +144,13 @@ const initialTab = window.location.hash.slice(1)
 const tab = ref(TABS.some((item) => item.id === initialTab) ? initialTab : 'dashboard')
 const currentTabHelp = computed(() => TAB_HELP[tab.value])
 const showPageHelp = ref(true)
+const showAdvancedTrading = ref(false)
+const expandedGuidance = ref(new Set())
+function toggleGuidance(symbol) {
+  const next = new Set(expandedGuidance.value)
+  next.has(symbol) ? next.delete(symbol) : next.add(symbol)
+  expandedGuidance.value = next
+}
 watch(tab, (value) => window.history.replaceState(null, '', `#${value}`))
 window.addEventListener('hashchange', () => {
   const next = window.location.hash.slice(1)
@@ -338,6 +348,47 @@ const ACTIVITY_LABELS = {
 function activityLabel(type) {
   return ACTIVITY_LABELS[type] || String(type || 'Activity').replaceAll('_', ' ').toLowerCase()
 }
+function activityPnl(entry) {
+  const match = String(entry?.note || '').match(/P&L\s*([+-]?\d+(?:\.\d+)?)/i)
+  return match ? Number(match[1]) : null
+}
+function activityOutcome(entry) {
+  const pnl = activityPnl(entry)
+  if (pnl === null) return ''
+  if (pnl > 0) return 'profit'
+  if (pnl < 0) return 'loss'
+  return 'even'
+}
+function activityResult(entry) {
+  const pnl = activityPnl(entry)
+  if (pnl === null) return '—'
+  return `${pnl > 0 ? '+' : pnl < 0 ? '−' : ''}${formatCurrency(Math.abs(pnl))}`
+}
+function sastDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Johannesburg', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date)
+}
+const todayResults = computed(() => {
+  const today = sastDateKey(new Date())
+  const closedTypes = new Set(['AUTO_CLOSE', 'PAPER_CLOSE', 'REBALANCE_CLOSE', 'LIVE_SETTLED'])
+  const results = tradeHistory.value
+    .filter((entry) => closedTypes.has(entry.type) && sastDateKey(entry.timestamp) === today)
+    .map(activityPnl)
+    .filter((pnl) => pnl !== null)
+  const gained = results.filter((pnl) => pnl > 0).reduce((sum, pnl) => sum + pnl, 0)
+  const lost = Math.abs(results.filter((pnl) => pnl < 0).reduce((sum, pnl) => sum + pnl, 0))
+  return {
+    gained: Math.round(gained * 100) / 100,
+    lost: Math.round(lost * 100) / 100,
+    net: Math.round((gained - lost) * 100) / 100,
+    wins: results.filter((pnl) => pnl > 0).length,
+    losses: results.filter((pnl) => pnl < 0).length,
+    closed: results.length,
+  }
+})
 function friendlySystemError(message) {
   const text = String(message || '')
   if (/could not connect|handshake status|cloudflare|websocket/i.test(text)) {
@@ -393,6 +444,7 @@ const marketMap = computed(() => {
 })
 
 const portfolioExposureLabel = computed(() => formatCurrency(stats.value.total_exposure || 0))
+const paperEquityLabel = computed(() => formatCurrency(stats.value.paper_equity || 0))
 const rebalanceDriftLabel = computed(() => formatPercent(rebalancePlan.value.drift_score || 0))
 const passRateLabel = computed(() => {
   if (candleBacktest.value?.trades) {
@@ -464,6 +516,7 @@ function syncFromBootstrap() {
   settingsForm.auto_scan_interval_seconds = Number(settings.auto_scan_interval_seconds || 300)
   settingsForm.auto_hold_minutes = Number(settings.auto_hold_minutes || 25)
   settingsForm.auto_paper_exposure = Number(settings.auto_paper_exposure || 100)
+  settingsForm.paper_starting_balance = Number(settings.paper_starting_balance || 10000)
   settingsForm.max_trades_per_day = Number(settings.max_trades_per_day || 0)
   settingsForm.max_loss_streak = Number(settings.max_loss_streak || 0)
   settingsForm.loss_cooldown_minutes = Number(settings.loss_cooldown_minutes || 0)
@@ -598,6 +651,7 @@ async function saveSettings() {
         auto_scan_interval_seconds: Number(settingsForm.auto_scan_interval_seconds),
         auto_hold_minutes: Number(settingsForm.auto_hold_minutes),
         auto_paper_exposure: Number(settingsForm.auto_paper_exposure),
+        paper_starting_balance: Number(settingsForm.paper_starting_balance),
         max_trades_per_day: Number(settingsForm.max_trades_per_day),
         max_loss_streak: Number(settingsForm.max_loss_streak),
         loss_cooldown_minutes: Number(settingsForm.loss_cooldown_minutes),
@@ -827,6 +881,15 @@ onMounted(fetchBootstrap)
           <div class="stat-value stat-value-sm">{{ portfolioExposureLabel }}</div>
         </article>
         <article class="card stat-card">
+          <div class="stat-label">Demo account value</div>
+          <div class="stat-value stat-value-sm">{{ paperEquityLabel }}</div>
+          <small>
+            Started {{ formatCurrency(stats.paper_starting_balance || 0) }} ·
+            closed {{ formatCurrency(stats.paper_realized_pnl || 0) }} ·
+            open {{ formatCurrency(stats.paper_unrealized_pnl || 0) }}
+          </small>
+        </article>
+        <article class="card stat-card">
           <div class="stat-label">Portfolio change needed</div>
           <div class="stat-value">{{ rebalanceDriftLabel }}</div>
         </article>
@@ -868,6 +931,11 @@ onMounted(fetchBootstrap)
           <div class="item-row">
             <span>Today’s result: {{ formatCurrency(autoTrader.realized_pnl || 0) }}</span>
             <span>{{ autoTrader.trades_today || 0 }} trades today · {{ (autoTrader.pending_live || []).length }} real-money trades waiting</span>
+          </div>
+          <div class="note">
+            Practice size is a dollar notional, not currency units. A {{ formatCurrency(settingsForm.auto_paper_exposure) }}
+            trade earns or loses about {{ formatCurrency(settingsForm.auto_paper_exposure * 0.001) }} for each 0.10% price move.
+            Trades currently close after {{ settingsForm.auto_hold_minutes }} minutes, so small moves create small results.
           </div>
           <div v-for="item in autoTrader.pending_live || []" :key="`pl-${item.ref}`" class="item-row">
             <span>{{ item.symbol }} {{ item.side }} · {{ formatCurrency(item.stake) }} · ref {{ item.ref }}</span>
@@ -948,9 +1016,17 @@ onMounted(fetchBootstrap)
         <article v-show="tab === 'settings'" class="card section-card">
           <div class="section-head">
             <h2>Settings</h2>
-            <p>Store your own runtime configuration locally, including Deriv credentials, symbol definitions, and live-trade defaults.</p>
+            <p>Choose the main trading limits here. Technical connection options stay hidden unless you need them.</p>
           </div>
           <div class="section-body">
+            <div class="settings-intro">
+              <strong>Current setup: {{ settingsForm.risk_profile }} risk · {{ formatCurrency(settingsForm.auto_paper_exposure) }} per practice trade</strong>
+              <span>{{ settingsForm.max_open_positions }} trades at once · held for {{ settingsForm.auto_hold_minutes }} minutes</span>
+            </div>
+
+            <details class="advanced-options settings-group">
+              <summary>Connection and data source</summary>
+              <p class="field-help">Open this only to change credentials, account, or price provider.</p>
             <div class="form-grid">
               <div class="field">
                 <label>Broker Provider</label>
@@ -1054,7 +1130,9 @@ onMounted(fetchBootstrap)
                 />
               </div>
             </div>
+            </details>
 
+            <h3 class="settings-subtitle">Trading and safety</h3>
             <div class="form-grid">
               <div class="field">
                 <label>Risk Profile</label>
@@ -1077,46 +1155,56 @@ onMounted(fetchBootstrap)
                 </select>
               </div>
               <div class="field">
-                <label>Daily Profit Target (0 = off)</label>
+                <label>Stop after making this much today</label>
                 <input v-model.number="settingsForm.daily_profit_target" class="input" type="number" min="0" step="0.01" />
+                <small class="field-help">Use 0 for no daily target.</small>
               </div>
               <div class="field">
-                <label>Daily Loss Limit (0 = off)</label>
+                <label>Maximum daily loss</label>
                 <input v-model.number="settingsForm.daily_loss_limit" class="input" type="number" min="0" step="0.01" />
+                <small class="field-help">Use 0 for no daily limit.</small>
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Auto Scan Every (seconds)</label>
                 <input v-model.number="settingsForm.auto_scan_interval_seconds" class="input" type="number" min="30" max="3600" />
               </div>
               <div class="field">
-                <label>Auto Paper Hold (minutes)</label>
+                <label>Close practice trades after</label>
                 <input v-model.number="settingsForm.auto_hold_minutes" class="input" type="number" min="1" max="1440" />
+                <small class="field-help">Minutes. Longer holds can increase either gains or losses.</small>
               </div>
               <div class="field">
-                <label>Auto Paper Exposure</label>
+                <label>Amount per practice trade</label>
                 <input v-model.number="settingsForm.auto_paper_exposure" class="input" type="number" min="1" />
+                <small class="field-help">Notional dollars used to calculate demo profit and loss.</small>
               </div>
               <div class="field">
-                <label>Max Trades Per Day (0 = off)</label>
+                <label>Demo Starting Balance</label>
+                <input v-model.number="settingsForm.paper_starting_balance" class="input" type="number" min="1" step="100" />
+              </div>
+              <div class="field">
+                <label>Maximum trades per day</label>
                 <input v-model.number="settingsForm.max_trades_per_day" class="input" type="number" min="0" max="1000" />
+                <small class="field-help">Use 0 for no limit.</small>
               </div>
               <div class="field">
-                <label>Halt After Losses In A Row (0 = off)</label>
+                <label>Stop after consecutive losses</label>
                 <input v-model.number="settingsForm.max_loss_streak" class="input" type="number" min="0" max="100" />
+                <small class="field-help">Use 0 to keep trading.</small>
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Cooldown After A Loss (minutes)</label>
                 <input v-model.number="settingsForm.loss_cooldown_minutes" class="input" type="number" min="0" max="1440" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Trade from (South African hour)</label>
                 <input v-model.number="settingsForm.trading_hours_start" class="input" type="number" min="0" max="23" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Trade until (South African hour, same = all day)</label>
                 <input v-model.number="settingsForm.trading_hours_end" class="input" type="number" min="0" max="23" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Rebalance Tolerance %</label>
                 <input
                   v-model.number="settingsForm.rebalance_tolerance_pct"
@@ -1127,26 +1215,26 @@ onMounted(fetchBootstrap)
                   step="0.5"
                 />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Allocation Mode</label>
                 <select v-model="settingsForm.rebalance_key_mode" class="select">
                   <option value="asset_class">Asset Class</option>
                   <option value="symbol">Symbol</option>
                 </select>
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Live Stake</label>
                 <input v-model.number="settingsForm.live_trade_stake" class="input" type="number" min="0.35" step="0.01" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Live Currency</label>
                 <input v-model="settingsForm.live_trade_currency" class="input" type="text" maxlength="10" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Live Duration</label>
                 <input v-model.number="settingsForm.live_trade_duration" class="input" type="number" min="1" max="365" />
               </div>
-              <div class="field">
+              <div v-if="showAdvancedTrading" class="field">
                 <label>Live Duration Unit</label>
                 <select v-model="settingsForm.live_trade_duration_unit" class="select">
                   <option value="t">Ticks</option>
@@ -1157,6 +1245,10 @@ onMounted(fetchBootstrap)
                 </select>
               </div>
             </div>
+
+            <button class="button secondary settings-more" type="button" @click="showAdvancedTrading = !showAdvancedTrading">
+              {{ showAdvancedTrading ? 'Hide advanced trading controls' : 'Show advanced trading controls' }}
+            </button>
 
             <div class="toggle-row">
               <label class="check-line">
@@ -1173,27 +1265,20 @@ onMounted(fetchBootstrap)
               </label>
             </div>
 
-            <div class="field">
-              <label>Target Allocations JSON</label>
-              <textarea
-                v-model="allocationJson"
-                class="textarea code-block"
-                spellcheck="false"
-                placeholder='{"FOREX": 0.4, "SYNTHETICS": 0.25}'
-              />
-            </div>
-
+            <h3 class="settings-subtitle">Markets to watch</h3>
             <SymbolPicker v-model="symbolsJson" :source="settingsForm.market_source" />
 
-            <div class="field">
-              <label>Configured Symbols JSON</label>
-              <textarea
-                v-model="symbolsJson"
-                class="textarea code-block"
-                spellcheck="false"
-                placeholder='[{"symbol":"frxEURUSD","label":"EUR/USD","asset_class":"FOREX"}]'
-              />
-            </div>
+            <details class="advanced-options settings-group">
+              <summary>Advanced portfolio configuration</summary>
+              <div class="field">
+                <label>Target Allocations JSON</label>
+                <textarea v-model="allocationJson" class="textarea code-block" spellcheck="false" placeholder='{"FOREX": 0.4, "SYNTHETICS": 0.25}' />
+              </div>
+              <div class="field">
+                <label>Configured Symbols JSON</label>
+                <textarea v-model="symbolsJson" class="textarea code-block" spellcheck="false" placeholder='[{"symbol":"frxEURUSD","label":"EUR/USD","asset_class":"FOREX"}]' />
+              </div>
+            </details>
 
             <div class="market-data-status" :class="{ 'market-data-ready': market.length, 'market-data-error': !market.length && lastScan?.errors?.length }">
               <div>
@@ -1405,7 +1490,7 @@ onMounted(fetchBootstrap)
       </section>
 
       <section class="tab-section">
-        <article v-show="tab === 'dashboard'" class="card section-card">
+        <article v-show="tab === 'signals'" class="card section-card">
           <div class="section-head">
             <h2>Trade suggestions</h2>
             <p>The bot checks current prices and explains whether buying, selling, or waiting may be appropriate.</p>
@@ -1442,18 +1527,23 @@ onMounted(fetchBootstrap)
                       <td class="num">{{ row.take_profit ?? '—' }}</td>
                       <td class="num nowrap">{{ row.risk_reward_ratio ? `${row.risk_reward_ratio}:1` : '—' }}</td>
                       <td class="market-guidance">
-                        <strong>{{ row.trade_plan?.entry || row.reason }}</strong>
-                        <span v-if="row.trade_plan"><b>When to place:</b> {{ row.trade_plan.when_to_place }}</span>
-                        <span v-if="row.trade_plan"><b>When to stop:</b> {{ row.trade_plan.when_to_stop }}</span>
-                        <span v-if="row.trade_plan"><b>When to take profit:</b> {{ row.trade_plan.when_to_take_profit }}</span>
-                        <span v-if="row.trade_plan"><b>Cancel this idea:</b> {{ row.trade_plan.cancel_if }}</span>
-                        <span class="muted">{{ row.reason }}</span>
-                        <span v-if="row.exit_recommendation_basis" class="muted">
-                          {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
-                        </span>
+                        <strong class="guidance-summary">{{ row.trade_plan?.entry || row.reason }}</strong>
                         <div class="actions market-actions">
                           <button class="button secondary" :disabled="busy || row.decision === 'HOLD'" @click="quickTrade(row)">Open From Signal</button>
                           <button class="button secondary" :disabled="busy || row.decision === 'HOLD' || !liveTradingReady" @click="quickLiveTrade(row)">Send Live Order</button>
+                          <button class="button secondary" type="button" :aria-expanded="expandedGuidance.has(row.symbol)" @click="toggleGuidance(row.symbol)">
+                            {{ expandedGuidance.has(row.symbol) ? 'Hide' : 'View' }}
+                          </button>
+                        </div>
+                        <div v-if="expandedGuidance.has(row.symbol)" class="guidance-details">
+                          <span v-if="row.trade_plan"><b>When to place:</b> {{ row.trade_plan.when_to_place }}</span>
+                          <span v-if="row.trade_plan"><b>When to stop:</b> {{ row.trade_plan.when_to_stop }}</span>
+                          <span v-if="row.trade_plan"><b>When to take profit:</b> {{ row.trade_plan.when_to_take_profit }}</span>
+                          <span v-if="row.trade_plan"><b>Cancel this idea:</b> {{ row.trade_plan.cancel_if }}</span>
+                          <span class="muted">{{ row.reason }}</span>
+                          <span v-if="row.exit_recommendation_basis" class="muted">
+                            {{ row.exit_recommendation_basis }} Recommendations are informational and are not applied automatically.
+                          </span>
                         </div>
                       </td>
                     </tr>
@@ -1537,7 +1627,7 @@ onMounted(fetchBootstrap)
       </section>
 
       <section class="tab-section">
-        <article v-show="tab === 'dashboard'" class="card section-card">
+        <article v-show="tab === 'signals'" class="card section-card">
           <div class="section-head">
             <h2>Portfolio</h2>
             <p>Current demo positions with refreshed market prices.</p>
@@ -1704,28 +1794,58 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article v-show="tab === 'dashboard'" class="card section-card">
+        <article v-show="tab === 'signals'" class="card section-card recent-activity-card">
           <div class="section-head">
             <h2>Recent Activity</h2>
             <p>The latest paper-trade and rebalance events. The full history is kept in the CSV journal.</p>
             <button class="button secondary" type="button" @click="exportJournal">Export CSV</button>
           </div>
-          <div class="section-body stack-list">
-            <div v-for="entry in tradeHistory" :key="`${entry.timestamp}-${entry.symbol}-${entry.type}`" class="item-card">
-              <div class="item-row">
-                <div class="item-title">{{ activityLabel(entry.type) }}</div>
-                <div class="kv">{{ friendlyDateTime(entry.timestamp) }}</div>
-              </div>
-              <div class="item-row">
-                <span>{{ entry.symbol || 'App activity' }}</span>
-                <span>{{ entry.side || 'No direction' }}</span>
-              </div>
-              <div class="item-row">
-                <span>{{ formatCurrency(entry.exposure) }}</span>
-                <span class="muted">{{ entry.note }}</span>
-              </div>
-            </div>
+          <div class="section-body activity-table-scroll">
+            <table class="activity-table">
+              <thead><tr><th>Activity</th><th>Date</th><th>Market</th><th>Side</th><th class="num">Trade size</th><th class="num">Result</th><th>Details</th></tr></thead>
+              <tbody>
+                <tr v-for="entry in tradeHistory" :key="`${entry.timestamp}-${entry.symbol}-${entry.type}`" :class="activityOutcome(entry) ? `activity-${activityOutcome(entry)}` : ''">
+                  <td>
+                    <strong>{{ activityLabel(entry.type) }}</strong>
+                    <span v-if="activityOutcome(entry)" class="result-badge" :class="activityOutcome(entry)">
+                      {{ activityOutcome(entry) === 'profit' ? 'Closed in profit' : activityOutcome(entry) === 'loss' ? 'Closed at a loss' : 'Closed even' }}
+                    </span>
+                  </td>
+                  <td class="nowrap muted">{{ friendlyDateTime(entry.timestamp) }}</td>
+                  <td class="nowrap">{{ entry.symbol || 'App' }}</td>
+                  <td>{{ entry.side || '—' }}</td>
+                  <td class="num nowrap">{{ formatCurrency(entry.exposure) }}</td>
+                  <td class="num nowrap activity-result" :class="activityOutcome(entry)">{{ activityResult(entry) }}</td>
+                  <td class="activity-note" :title="entry.note">{{ entry.note }}</td>
+                </tr>
+              </tbody>
+            </table>
             <div v-if="!tradeHistory.length" class="empty-state">No trade history recorded yet.</div>
+          </div>
+        </article>
+
+        <article v-show="tab === 'signals'" class="card section-card today-results-card">
+          <div class="section-head">
+            <h2>Today’s Results</h2>
+            <p>Closed-trade results for today in South African time.</p>
+          </div>
+          <div class="section-body today-results-grid">
+            <div class="today-result profit">
+              <span>Money gained</span>
+              <strong>+{{ formatCurrency(todayResults.gained) }}</strong>
+              <small>{{ todayResults.wins }} winning {{ todayResults.wins === 1 ? 'trade' : 'trades' }}</small>
+            </div>
+            <div class="today-result loss">
+              <span>Money lost</span>
+              <strong>−{{ formatCurrency(todayResults.lost) }}</strong>
+              <small>{{ todayResults.losses }} losing {{ todayResults.losses === 1 ? 'trade' : 'trades' }}</small>
+            </div>
+            <div class="today-net" :class="todayResults.net > 0 ? 'profit' : todayResults.net < 0 ? 'loss' : 'even'">
+              <span>Net result</span>
+              <strong>{{ todayResults.net > 0 ? '+' : todayResults.net < 0 ? '−' : '' }}{{ formatCurrency(Math.abs(todayResults.net)) }}</strong>
+              <small>{{ todayResults.closed }} closed {{ todayResults.closed === 1 ? 'trade' : 'trades' }} today</small>
+            </div>
+            <p v-if="!todayResults.closed" class="empty-state">No trades with a recorded result have closed today yet.</p>
           </div>
         </article>
       </section>

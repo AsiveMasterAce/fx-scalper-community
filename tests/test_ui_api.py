@@ -25,6 +25,14 @@ def test_demo_loads_replay_and_paper_only(client):
     assert [row["symbol"] for row in settings["symbols"]] == ["frxEURUSD"]
 
 
+def test_bootstrap_reports_demo_account_value(client):
+    payload = client.get("/api/bootstrap").get_json()
+    assert payload["stats"]["paper_starting_balance"] == 10000.0
+    assert payload["stats"]["paper_equity"] == 10000.0
+    assert payload["stats"]["paper_realized_pnl"] == 0.0
+    assert payload["stats"]["paper_unrealized_pnl"] == 0.0
+
+
 def test_candles_and_journal_routes(client):
     client.post("/api/demo")
     candles = client.get("/api/candles?symbol=frxEURUSD&count=50").get_json()

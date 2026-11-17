@@ -1,9 +1,14 @@
 
 > market-ops-community-frontend@0.1.0 dev
-> vite --host 0.0.0.0 --port 5173
+> vite --host 0.0.0.0 --port 5173 --host 127.0.0.1
 
+15:14:55 [vite] (client) Re-optimizing dependencies because lockfile has changed
 
-  VITE v6.4.5  ready in 4958 ms
+  VITE v6.4.5  ready in 940 ms
 
-  ➜  Local:   http://localhost:5173/
-  ➜  Network: http://192.168.8.25:5173/
+  ➜  Local:   http://127.0.0.1:5173/
+15:20:09 [vite] (client) hmr update /src/App.vue
+15:20:29 [vite] (client) hmr update /src/styles.css
+15:23:35 [vite] (client) hmr update /src/App.vue
+15:23:47 [vite] (client) hmr update /src/App.vue
+15:23:58 [vite] (client) hmr update /src/styles.css
