@@ -50,6 +50,10 @@ class LiveBroker:
         """Close a position that does not settle itself. Returns {"profit": float}."""
         raise NotImplementedError
 
+    def refresh_balance(self, *, source: str = "refresh") -> Optional[dict]:
+        """Fetch an authoritative account/balance snapshot from the broker if supported."""
+        return None
+
     def close(self) -> None:
         return None
 
@@ -72,17 +76,28 @@ class DerivBroker(LiveBroker):
         self.account: Optional[dict] = None
 
     def describe(self) -> dict:
+        account = self.account or {}
         return {
             "broker": self.name,
             "app_id": self.client.app_id,
             "token_mode": self.client.token_mode,
             "options_account_mode": self.settings.get("deriv_options_account_mode", "demo"),
+            "account_id": account.get("account_id") or account.get("loginid") or "",
+            "account_type": account.get("account_type") or "",
         }
 
     def _connected(self) -> dict:
         if self.account is None:
             self.account = self.client.connect()
         return self.account
+
+    def refresh_balance(self, *, source: str = "refresh") -> Optional[dict]:
+        try:
+            self._connected()
+            self.account = self.client.refresh_account_snapshot(update_source=source)
+            return self.account
+        except DerivServiceError as exc:
+            raise BrokerError(str(exc)) from exc
 
     def open_trade(self, *, symbol: str, side: str, amount: float, **options) -> dict:
         try:
@@ -104,6 +119,18 @@ class DerivBroker(LiveBroker):
             except (TypeError, ValueError):
                 ask_price = float(amount)
             buy = self.client.buy(proposal_id, ask_price)
+            try:
+                account = self.client.refresh_account_snapshot(update_source="purchase")
+                self.account = account
+            except DerivServiceError:
+                if buy.get("balance_after") is not None:
+                    account = {
+                        **account,
+                        "balance": float(buy["balance_after"]),
+                        "balance_synced": True,
+                        "update_source": "purchase",
+                    }
+                    self.account = account
         except DerivServiceError as exc:
             raise BrokerError(str(exc)) from exc
         return {

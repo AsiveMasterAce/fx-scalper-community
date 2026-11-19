@@ -17,6 +17,7 @@ from flask_cors import CORS
 from app.deriv_service import (
     DEFAULT_REST_URL,
     DEFAULT_WS_URL,
+    DerivBalanceSyncService,
     DerivCommunityClient,
     DerivServiceError,
 )
@@ -562,6 +563,41 @@ def record_broker_status(state: dict, status: dict) -> dict:
     return stored
 
 
+BALANCE_SYNC = DerivBalanceSyncService()
+
+
+def ensure_balance_sync(settings: dict) -> None:
+    if app.config.get("TESTING"):
+        return
+    BALANCE_SYNC.ensure_started(settings)
+
+
+def sync_broker_snapshot(
+    state: dict,
+    snapshot: dict,
+    *,
+    message: str,
+    source: str,
+    extra: Optional[dict] = None,
+) -> dict:
+    options_account_id = str(
+        snapshot.get("options_account_id") or snapshot.get("account_id") or snapshot.get("loginid") or ""
+    ).strip()
+    if options_account_id and not snapshot.get("account_mode_mismatch"):
+        state["settings"]["deriv_options_account_id"] = options_account_id
+    payload = {
+        "ok": True,
+        "connected": True,
+        "message": message,
+        **(extra or {}),
+        **snapshot,
+        "update_source": source,
+    }
+    status = record_broker_status(state, payload)
+    BALANCE_SYNC.record_snapshot(snapshot, source=source)
+    return status
+
+
 def classify_regime(snapshot: dict, thresholds: dict[str, float]) -> str:
     if float(snapshot.get("atr_ratio") or 0.0) < 0.85:
         return "LOW_VOLATILITY"
@@ -1047,9 +1083,17 @@ def bootstrap_payload(state: dict) -> dict:
         state.get("portfolio", []),
         settings.get("rebalance_key_mode", "asset_class"),
     )
+    ensure_balance_sync(settings)
     auto = state.get("auto_trader") or default_auto_state()
     starting_balance = float(settings.get("paper_starting_balance", 10000.0) or 10000.0)
-    realized_pnl = round(sum(float(row.get("pnl") or 0.0) for row in auto.get("closed_trades", [])), 2)
+    realized_pnl = round(
+        sum(
+            float(row.get("pnl") or 0.0)
+            for row in auto.get("closed_trades", [])
+            if str(row.get("mode") or "paper").strip().lower() != "live"
+        ),
+        2,
+    )
     unrealized_pnl = round(
         sum(
             paper_pnl(position, float(position.get("current_price") or position["entry_price"]))
@@ -1057,6 +1101,7 @@ def bootstrap_payload(state: dict) -> dict:
         ),
         2,
     )
+    broker_sync = BALANCE_SYNC.get_status(settings, state.get("last_broker_status"))
     return {
         "settings": public_settings(settings),
         "market": market,
@@ -1067,6 +1112,7 @@ def bootstrap_payload(state: dict) -> dict:
         "rebalance_plan": build_rebalance_plan(state),
         "last_backtest": state.get("last_backtest"),
         "last_broker_status": state.get("last_broker_status"),
+        "broker_sync": broker_sync,
         "last_scan": state.get("last_scan"),
         "auto_trader": auto,
         "auto_performance": performance(auto.get("closed_trades") or []),
@@ -1152,11 +1198,22 @@ def normalize_settings(payload: dict, current: dict) -> dict:
         payload_value(payload, "deriv_ws_url", current, merged, DEFAULT_DERIV_WS_URL)
         or DEFAULT_DERIV_WS_URL
     ).strip()
+    previous_mode = str(current.get("deriv_options_account_mode") or "demo").strip().lower()
+    previous_account_id = str(current.get("deriv_options_account_id") or "").strip()
     account_mode = str(payload_value(payload, "deriv_options_account_mode", current, merged, "demo")).strip().lower()
     merged["deriv_options_account_mode"] = account_mode if account_mode in {"demo", "real"} else "demo"
-    merged["deriv_options_account_id"] = str(
+    candidate_account_id = str(
         payload_value(payload, "deriv_options_account_id", current, merged, "") or ""
     ).strip()
+    inferred_type = DerivCommunityClient.infer_account_type_from_id(candidate_account_id)
+    if (
+        merged["deriv_options_account_mode"] != previous_mode
+        and (not candidate_account_id or candidate_account_id == previous_account_id)
+    ):
+        candidate_account_id = ""
+    elif inferred_type and inferred_type != merged["deriv_options_account_mode"]:
+        candidate_account_id = ""
+    merged["deriv_options_account_id"] = candidate_account_id
     risk = str(payload.get("risk_profile", current.get("risk_profile", "balanced"))).strip().lower()
     merged["risk_profile"] = risk if risk in {"conservative", "balanced", "aggressive"} else "balanced"
     try:
@@ -1313,21 +1370,101 @@ def market_scan():
 @app.post("/api/config")
 def update_config():
     state = load_state()
-    state["settings"] = normalize_settings(json_payload(), state.get("settings", {}))
+    previous = dict(state.get("settings", {}))
+    updated = normalize_settings(json_payload(), previous)
+    state["settings"] = updated
+    broker_keys = (
+        "broker_provider",
+        "deriv_app_id",
+        "deriv_token",
+        "deriv_api_url",
+        "deriv_ws_url",
+        "deriv_options_account_mode",
+        "deriv_options_account_id",
+    )
+    if any(previous.get(key) != updated.get(key) for key in broker_keys):
+        last_status = state.get("last_broker_status")
+        if isinstance(last_status, dict):
+            last_type = str(last_status.get("account_type") or "").strip().lower()
+            if (
+                previous.get("broker_provider") != updated.get("broker_provider")
+                or previous.get("deriv_token") != updated.get("deriv_token")
+                or previous.get("deriv_options_account_mode") != updated.get("deriv_options_account_mode")
+                or (last_type in {"demo", "real"} and last_type != updated.get("deriv_options_account_mode"))
+            ):
+                state["last_broker_status"] = None
+        BALANCE_SYNC.reset()
+        ensure_balance_sync(updated)
     save_state(state)
-    return jsonify({"message": "Settings updated", "settings": public_settings(state["settings"])})
+    return jsonify(
+        {
+            "message": "Settings updated",
+            "settings": public_settings(state["settings"]),
+            "broker_sync": BALANCE_SYNC.get_status(state["settings"], state.get("last_broker_status")),
+        }
+    )
 
 
 @app.get("/api/broker/status")
 def broker_status():
     state = load_state()
     settings = state.get("settings", {})
+    ensure_balance_sync(settings)
     return jsonify(
         {
             "status": state.get("last_broker_status"),
+            "broker_sync": BALANCE_SYNC.get_status(settings, state.get("last_broker_status")),
             "setup": setup_status(settings, market_view(settings)),
         }
     )
+
+
+@app.get("/api/broker/balance")
+def broker_balance():
+    state = load_state()
+    settings = state.get("settings", {})
+    ensure_balance_sync(settings)
+    return jsonify(
+        {
+            "broker_sync": BALANCE_SYNC.get_status(settings, state.get("last_broker_status")),
+            "status": state.get("last_broker_status"),
+        }
+    )
+
+
+@app.post("/api/broker/balance/refresh")
+def broker_balance_refresh():
+    state = load_state()
+    settings = state.get("settings", {})
+    if settings.get("broker_provider", "deriv") != "deriv":
+        return error_response("Real-time balance refresh is only available for Deriv accounts.", 400)
+    try:
+        snapshot = BALANCE_SYNC.refresh_now(settings, source="refresh")
+        status = sync_broker_snapshot(
+            state,
+            snapshot,
+            message="Deriv account balance refreshed.",
+            source="refresh",
+        )
+        ensure_balance_sync(state["settings"])
+        save_state(state)
+        return jsonify(
+            {
+                "ok": True,
+                "message": status["message"],
+                "status": status,
+                "broker_sync": BALANCE_SYNC.get_status(state["settings"], status),
+            }
+        )
+    except DerivServiceError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(exc),
+                "message": str(exc),
+                "broker_sync": BALANCE_SYNC.get_status(settings, state.get("last_broker_status")),
+            }
+        ), 400
 
 
 def binance_broker_test(state: dict) -> dict:
@@ -1368,21 +1505,23 @@ def broker_test():
     try:
         snapshot = client.connect()
         active_symbols = client.get_active_symbols()
-        options_account_id = str(snapshot.get("options_account_id") or "").strip()
-        if options_account_id:
-            state["settings"]["deriv_options_account_id"] = options_account_id
-        status = record_broker_status(
+        status = sync_broker_snapshot(
             state,
+            snapshot,
+            message="Deriv connection verified successfully.",
+            source="broker_test",
+            extra={"active_symbol_count": len(active_symbols)},
+        )
+        ensure_balance_sync(state["settings"])
+        save_state(state)
+        return jsonify(
             {
                 "ok": True,
-                "connected": True,
-                "message": "Deriv connection verified successfully.",
-                "active_symbol_count": len(active_symbols),
-                **snapshot,
-            },
+                "message": status["message"],
+                "status": status,
+                "broker_sync": BALANCE_SYNC.get_status(state["settings"], status),
+            }
         )
-        save_state(state)
-        return jsonify({"ok": True, "message": status["message"], "status": status})
     except DerivServiceError as exc:
         status = record_broker_status(
             state,
@@ -1548,18 +1687,25 @@ def live_trade_open():
             raise DerivServiceError("Deriv did not return a proposal ID for this trade.")
         ask_price = sanitize_live_amount(proposal.get("ask_price", amount), amount)
         buy = client.buy(proposal_id, ask_price)
-        options_account_id = str(snapshot.get("options_account_id") or "").strip()
-        if options_account_id:
-            state["settings"]["deriv_options_account_id"] = options_account_id
-        status = record_broker_status(
+        try:
+            post_buy_snapshot = client.refresh_account_snapshot(update_source="purchase")
+        except DerivServiceError:
+            post_buy_snapshot = dict(snapshot)
+            if buy.get("balance_after") is not None:
+                post_buy_snapshot["balance"] = float(buy["balance_after"])
+                post_buy_snapshot["balance_synced"] = True
+                post_buy_snapshot["balance_synced_at"] = utc_now_iso()
+            post_buy_snapshot["update_source"] = "purchase"
+        status = sync_broker_snapshot(
             state,
-            {
-                "ok": True,
-                "connected": True,
-                "message": "Deriv live trade submitted successfully.",
-                **snapshot,
-            },
+            post_buy_snapshot,
+            message="Deriv live trade submitted successfully.",
+            source="purchase",
         )
+        ensure_balance_sync(state["settings"])
+        account_id = post_buy_snapshot.get("account_id") or post_buy_snapshot.get("loginid") or ""
+        account_type = post_buy_snapshot.get("account_type") or ""
+        account_tag = f" Account {account_id} ({account_type})." if account_id else ""
         record_event(
             state,
             {
@@ -1571,6 +1717,7 @@ def live_trade_open():
                 "note": (
                     f"Live {contract_type} submitted via Deriv community flow. "
                     f"Contract {buy.get('contract_id') or buy.get('transaction_id') or 'pending'}."
+                    f"{account_tag}"
                 ),
             },
         )
@@ -1579,6 +1726,7 @@ def live_trade_open():
             {
                 "message": "Live trade submitted",
                 "status": status,
+                "broker_sync": BALANCE_SYNC.get_status(state["settings"], status),
                 "proposal": proposal,
                 "buy": buy,
                 "request": {
@@ -1708,6 +1856,7 @@ def position_status(broker, item: dict, now, hold_minutes: object) -> dict:
 
 def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
     still_pending = []
+    settled_any = False
     for item in auto["pending_live"]:
         try:
             status = position_status(broker, item, now, state["settings"].get("auto_hold_minutes", 25))
@@ -1718,6 +1867,7 @@ def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
         if not status.get("settled"):
             still_pending.append(item)
             continue
+        settled_any = True
         record_close(
             auto, state["settings"], symbol=item["symbol"], side=item["side"],
             pnl=status["profit"], now=now, mode="live",
@@ -1728,6 +1878,18 @@ def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
             f"settled {float(status['profit']):+.2f}.",
         )
     auto["pending_live"] = still_pending
+    if settled_any and hasattr(broker, "refresh_balance"):
+        try:
+            refreshed = broker.refresh_balance(source="settlement")
+            if isinstance(refreshed, dict):
+                sync_broker_snapshot(
+                    state,
+                    refreshed,
+                    message="Deriv balance refreshed after contract settlement.",
+                    source="settlement",
+                )
+        except BrokerError as exc:
+            auto["last_error"] = str(exc)
 
 
 def close_due_paper_positions(state: dict, auto: dict, now) -> None:
@@ -1791,11 +1953,25 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
                 )
                 continue
             exposure = trade["price"]
+            account_snapshot = trade.get("account") if isinstance(trade.get("account"), dict) else None
+            if account_snapshot:
+                sync_broker_snapshot(
+                    state,
+                    account_snapshot,
+                    message="Deriv balance refreshed after contract purchase.",
+                    source="purchase",
+                )
             auto["pending_live"].append(
                 {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure,
                  "opened_at": utc_now_iso(), "position": trade.get("position")}
             )
-            note = f"Live {trade.get('contract_type', '')} via {broker.name}, contract {trade['ref'] or 'pending'}."
+            account_id = (account_snapshot or {}).get("account_id") or (account_snapshot or {}).get("loginid") or ""
+            account_type = (account_snapshot or {}).get("account_type") or ""
+            account_tag = f" [{account_id} {account_type}]" if account_id else ""
+            note = (
+                f"Live {trade.get('contract_type', '')} via {broker.name}, "
+                f"contract {trade['ref'] or 'pending'}.{account_tag}"
+            )
         else:
             exposure, note = open_paper_auto_trade(state, signal)
         auto["trades_today"] = int(auto["trades_today"]) + 1
@@ -1971,6 +2147,7 @@ def demo_setup():
 @app.post("/api/reset")
 def reset():
     stop_auto_thread()
+    BALANCE_SYNC.reset()
     state = deepcopy(DEFAULT_STATE)
     save_state(state)
     return jsonify({"message": "Community edition state reset", "settings": public_settings(state["settings"])})
@@ -1979,6 +2156,7 @@ def reset():
 if __name__ == "__main__":
     # Never resume trading silently after a restart; the user presses Start again.
     set_auto_running(False)
+    ensure_balance_sync(load_state()["settings"])
     app.run(
         host=os.getenv("FLASK_HOST", "127.0.0.1"),
         port=int(os.getenv("FLASK_PORT", "5001")),

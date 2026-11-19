@@ -59,6 +59,7 @@ const bootstrapData = ref({
   rebalance_plan: { actions: [], current_weights: {}, target_weights: {} },
   last_backtest: null,
   last_broker_status: null,
+  broker_sync: null,
   last_scan: null,
   symbols: [],
   stats: {},
@@ -327,6 +328,7 @@ function formatRate(value) {
   return value === null || value === undefined ? '–' : `${(value * 100).toFixed(1)}%`
 }
 const lastBrokerStatus = computed(() => bootstrapData.value.last_broker_status || null)
+const brokerSync = computed(() => bootstrapData.value.broker_sync || null)
 const setupStatus = computed(() => bootstrapData.value.setup || {})
 const lastScan = computed(() => bootstrapData.value.last_scan || null)
 const scanFailed = computed(() => Boolean(lastScan.value?.errors?.length && !lastScan.value?.scanned))
@@ -363,6 +365,10 @@ function activityMoneyKind(entry) {
 }
 function activityDisplayLabel(entry) {
   const kind = activityMoneyKind(entry)
+  const note = String(entry?.note || '')
+  if (entry.type === 'LIVE_OPEN' && /\b(?:DOT\w+|\(demo\)|demo\])/i.test(note)) {
+    return 'Deriv demo trade opened'
+  }
   if (entry.type === 'AUTO_START') return kind === 'live' ? 'Automatic live trading started' : 'Automatic practice started'
   if (entry.type === 'AUTO_STOP') return kind === 'live' ? 'Automatic live trading stopped' : kind === 'practice' ? 'Automatic practice stopped' : 'Automatic trading stopped'
   if (kind === 'live' && entry.type === 'AUTO_OPEN') return 'Live trade opened'
@@ -427,20 +433,99 @@ function friendlyDateTime(value) {
   return formatSastDateTime(value)
 }
 const liveTradingReady = computed(() => Boolean(setupStatus.value.live_trading_ready))
-const brokerStatusLabel = computed(() => {
-  if (lastBrokerStatus.value?.connected) {
-    return 'Connected'
+const activeBrokerAccountId = computed(
+  () =>
+    brokerSync.value?.account_id ||
+    brokerSync.value?.loginid ||
+    lastBrokerStatus.value?.account_id ||
+    lastBrokerStatus.value?.loginid ||
+    lastBrokerStatus.value?.options_account_id ||
+    '',
+)
+const activeBrokerAccountType = computed(() => {
+  const raw = String(
+    brokerSync.value?.account_type || lastBrokerStatus.value?.account_type || '',
+  )
+    .trim()
+    .toLowerCase()
+  if (raw === 'real' || raw === 'demo') return raw
+  const id = String(activeBrokerAccountId.value || '').toUpperCase()
+  if (id.startsWith('DOT') || id.startsWith('VRTC')) return 'demo'
+  if (id.startsWith('ROT') || id.startsWith('CR')) return 'real'
+  return ''
+})
+const configuredDerivMode = computed(
+  () => String(bootstrapData.value.settings?.deriv_options_account_mode || 'demo').trim().toLowerCase(),
+)
+const brokerModeMismatch = computed(() => Boolean(brokerSync.value?.account_mode_mismatch))
+const brokerBalanceValue = computed(() => {
+  if (brokerSync.value && brokerSync.value.balance !== null && brokerSync.value.balance !== undefined) {
+    return Number(brokerSync.value.balance)
   }
-  if (lastBrokerStatus.value?.checked_at) {
-    return 'Check Failed'
+  if (
+    lastBrokerStatus.value &&
+    lastBrokerStatus.value.balance !== null &&
+    lastBrokerStatus.value.balance !== undefined &&
+    !brokerModeMismatch.value
+  ) {
+    return Number(lastBrokerStatus.value.balance)
   }
+  return null
+})
+const brokerBalanceCurrency = computed(
+  () => brokerSync.value?.currency || lastBrokerStatus.value?.currency || 'USD',
+)
+const brokerBalanceLabel = computed(() => {
+  if (brokerBalanceValue.value === null || Number.isNaN(brokerBalanceValue.value)) {
+    return 'Unavailable'
+  }
+  return formatBrokerMoney(brokerBalanceValue.value, brokerBalanceCurrency.value)
+})
+const brokerApiStatusLabel = computed(() => {
+  const status = brokerSync.value?.api_status
+  if (status === 'connected') return 'Connected'
+  if (status === 'connecting') return 'Connecting'
+  if (status === 'reconnecting') return 'Reconnecting'
+  if (status === 'error') return 'API Error'
+  if (status === 'unconfigured') return 'Not Configured'
+  if (lastBrokerStatus.value?.connected) return 'Connected'
+  if (lastBrokerStatus.value?.checked_at) return 'Check Failed'
   return 'Not Tested'
 })
+const brokerSyncStatusLabel = computed(() => {
+  if (brokerModeMismatch.value) return 'Account Mismatch'
+  const status = brokerSync.value?.sync_status
+  if (status === 'synced') return brokerSync.value?.subscription_active ? 'Synced (Live)' : 'Synced'
+  if (status === 'syncing') return 'Syncing'
+  if (status === 'stale') return 'Stale'
+  if (status === 'error') return 'Sync Error'
+  return 'Not Synced'
+})
+const brokerUpdateSourceLabel = computed(() => {
+  const source = brokerSync.value?.last_update_source || lastBrokerStatus.value?.update_source || ''
+  const labels = {
+    subscription: 'Live WebSocket stream',
+    purchase: 'Refreshed after purchase',
+    settlement: 'Refreshed after settlement',
+    refresh: 'Manual refresh',
+    broker_test: 'Connection check',
+    connect: 'Initial API sync',
+  }
+  return labels[source] || (source ? source : '—')
+})
+const brokerLastSyncedAt = computed(
+  () =>
+    brokerSync.value?.last_synced_at ||
+    lastBrokerStatus.value?.balance_synced_at ||
+    lastBrokerStatus.value?.checked_at ||
+    null,
+)
+const brokerStatusLabel = computed(() => brokerApiStatusLabel.value)
 const brokerTokenLabel = computed(() => {
-  if (lastBrokerStatus.value?.token_mode === 'pat') {
+  if (brokerSync.value?.token_mode === 'pat' || lastBrokerStatus.value?.token_mode === 'pat') {
     return 'PAT'
   }
-  if (lastBrokerStatus.value?.token_mode === 'legacy') {
+  if (brokerSync.value?.token_mode === 'legacy' || lastBrokerStatus.value?.token_mode === 'legacy') {
     return 'Legacy'
   }
   if (settingsForm.deriv_token) {
@@ -455,9 +540,16 @@ const brokerName = computed(() => bootstrapData.value.settings?.broker_provider 
 const binanceMainnet = computed(
   () => brokerName.value === 'binance' && bootstrapData.value.settings?.binance_testnet === false,
 )
+const derivRealActive = computed(
+  () => brokerName.value === 'deriv' && (activeBrokerAccountType.value === 'real' || configuredDerivMode.value === 'real'),
+)
 const networkLabel = computed(() => {
   if (brokerName.value === 'binance') return binanceMainnet.value ? 'Binance MAINNET' : 'Binance testnet'
-  return `Deriv ${bootstrapData.value.settings?.deriv_options_account_mode || 'demo'}`
+  const acctType = (activeBrokerAccountType.value || configuredDerivMode.value || 'demo').toUpperCase()
+  if (activeBrokerAccountId.value) {
+    return `Deriv ${acctType} · ${activeBrokerAccountId.value}`
+  }
+  return `Deriv ${configuredDerivMode.value || 'demo'}`
 })
 watch(errorMessage, (value) => value && pushToast('error', value))
 watch(successMessage, (value) => value && pushToast('success', value))
@@ -508,6 +600,34 @@ function formatCurrency(value) {
     currency: 'USD',
     maximumFractionDigits: 2,
   }).format(Number(value || 0))
+}
+
+function formatBrokerMoney(value, currency = 'USD') {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return 'Unavailable'
+  const code = String(currency || 'USD').trim().toUpperCase()
+  try {
+    return `${new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: code,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(num)} ${code}`
+  } catch {
+    return `${num.toFixed(2)} ${code}`
+  }
+}
+
+function onOptionsAccountModeChange() {
+  const id = String(settingsForm.deriv_options_account_id || '').trim().toUpperCase()
+  const mode = String(settingsForm.deriv_options_account_mode || 'demo').trim().toLowerCase()
+  if (
+    !id ||
+    (mode === 'real' && (id.startsWith('DOT') || id.startsWith('VRTC'))) ||
+    (mode === 'demo' && (id.startsWith('ROT') || id.startsWith('CR')))
+  ) {
+    settingsForm.deriv_options_account_id = ''
+  }
 }
 
 function formatPercent(value) {
@@ -734,6 +854,25 @@ async function testBrokerConnection() {
   }
 }
 
+async function refreshBrokerBalance() {
+  clearMessages()
+  busy.value = true
+  try {
+    const { data } = await api.post('broker/balance/refresh')
+    await refreshBootstrapState()
+    if (data?.ok) {
+      setSuccess(data.message || 'Deriv account balance refreshed.')
+      return
+    }
+    setError(new Error(data?.message || 'Could not refresh Deriv balance.'))
+  } catch (error) {
+    await refreshBootstrapState()
+    setError(error)
+  } finally {
+    busy.value = false
+  }
+}
+
 async function openPaperTrade() {
   await runAction(
     () =>
@@ -813,7 +952,26 @@ onMounted(fetchBootstrap)
           Automatic trading: {{ autoTrader.running ? (scanFailed ? 'waiting for prices' : 'on') : 'off' }}
         </span>
         <span class="pill">Market information: {{ bootstrapData.settings?.market_source || 'Deriv' }}</span>
-        <span class="pill" :class="{ 'pill-danger': binanceMainnet }">{{ networkLabel }}</span>
+        <span
+          class="pill"
+          :class="{
+            'pill-danger': binanceMainnet || (derivRealActive && !brokerModeMismatch),
+            'pill-warn': brokerModeMismatch,
+          }"
+        >
+          {{ networkLabel }}
+        </span>
+        <span
+          v-if="brokerName === 'deriv'"
+          class="pill"
+          :class="{
+            'pill-on': brokerSync?.sync_status === 'synced' && !brokerModeMismatch,
+            'pill-warn': brokerModeMismatch || brokerSync?.sync_status === 'stale' || brokerSync?.sync_status === 'error',
+          }"
+          :title="brokerLastSyncedAt ? `Last synced: ${friendlyDateTime(brokerLastSyncedAt)}` : 'Deriv balance synchronisation status'"
+        >
+          API: {{ brokerApiStatusLabel }} · Balance: {{ brokerSyncStatusLabel }}
+        </span>
         <span class="pill" :class="{ 'pill-warn': stale }" :title="stale ? 'The latest update did not work' : 'Updates every 10 seconds'">
           {{ stale ? 'Information may be out of date' : 'Information is up to date' }} · {{ lastUpdatedLabel }}
         </span>
@@ -907,8 +1065,43 @@ onMounted(fetchBootstrap)
           <div class="stat-label">Money currently in trades</div>
           <div class="stat-value stat-value-sm">{{ portfolioExposureLabel }}</div>
         </article>
+        <article v-if="brokerName === 'deriv'" class="card stat-card broker-balance-card">
+          <div class="stat-label-row">
+            <span class="stat-label">Deriv account balance</span>
+            <span
+              v-if="activeBrokerAccountType"
+              class="account-type-badge"
+              :class="activeBrokerAccountType === 'real' ? 'real' : 'demo'"
+            >
+              {{ activeBrokerAccountType.toUpperCase() }}
+            </span>
+          </div>
+          <div class="stat-value stat-value-sm">{{ brokerBalanceLabel }}</div>
+          <small class="broker-balance-meta">
+            <span>Account: <strong>{{ activeBrokerAccountId || 'Not connected' }}</strong></span>
+            <span>API: {{ brokerApiStatusLabel }} · {{ brokerSyncStatusLabel }}</span>
+            <span v-if="brokerLastSyncedAt">Synced {{ friendlyDateTime(brokerLastSyncedAt) }} ({{ brokerUpdateSourceLabel }})</span>
+          </small>
+          <div v-if="brokerModeMismatch" class="status-banner error compact-banner">
+            Configured mode is <strong>{{ configuredDerivMode }}</strong>, but last synced account is
+            <strong>{{ activeBrokerAccountId }} ({{ activeBrokerAccountType }})</strong>. Refresh or test connection.
+          </div>
+          <div v-else-if="brokerSync?.last_error" class="status-banner error compact-banner">
+            {{ brokerSync.last_error }}
+          </div>
+          <div class="stat-card-actions">
+            <button
+              class="button secondary compact-button"
+              type="button"
+              :disabled="busy || !derivTokenSaved"
+              @click="refreshBrokerBalance"
+            >
+              Refresh balance
+            </button>
+          </div>
+        </article>
         <article class="card stat-card">
-          <div class="stat-label">Demo account value</div>
+          <div class="stat-label">Practice (paper) value</div>
           <div class="stat-value stat-value-sm">{{ paperEquityLabel }}</div>
           <small>
             Started {{ formatCurrency(stats.paper_starting_balance || 0) }} ·
@@ -1142,7 +1335,11 @@ onMounted(fetchBootstrap)
               </div>
               <div class="field">
                 <label>Options Account Mode</label>
-                <select v-model="settingsForm.deriv_options_account_mode" class="select">
+                <select
+                  v-model="settingsForm.deriv_options_account_mode"
+                  class="select"
+                  @change="onOptionsAccountModeChange"
+                >
                   <option value="demo">Demo</option>
                   <option value="real">Real</option>
                 </select>
@@ -1153,8 +1350,11 @@ onMounted(fetchBootstrap)
                   v-model="settingsForm.deriv_options_account_id"
                   class="input"
                   type="text"
-                  placeholder="Optional account ID override"
+                  placeholder="Leave blank to auto-select by mode"
                 />
+                <small class="field-help">
+                  Automatically cleared when switching between Demo and Real so a demo ID cannot override Real mode.
+                </small>
               </div>
             </div>
             </details>
@@ -1351,42 +1551,78 @@ onMounted(fetchBootstrap)
           <div class="section-body">
             <div class="item-card">
               <div class="item-row">
-                <div class="item-title">Connection State</div>
+                <div class="item-title">API Connection</div>
                 <span
                   class="signal-pill"
-                  :class="lastBrokerStatus?.connected ? 'buy' : lastBrokerStatus?.checked_at ? 'sell' : 'hold'"
+                  :class="
+                    brokerSync?.connected || lastBrokerStatus?.connected
+                      ? 'buy'
+                      : brokerSync?.api_status === 'error' || lastBrokerStatus?.checked_at
+                        ? 'sell'
+                        : 'hold'
+                  "
                 >
-                  {{ brokerStatusLabel }}
+                  {{ brokerApiStatusLabel }}
                 </span>
               </div>
               <div class="item-row">
-                <span class="muted">Last checked</span>
-                <span class="kv">{{ friendlyDateTime(lastBrokerStatus?.checked_at) }}</span>
+                <span class="muted">Balance synchronisation</span>
+                <span class="kv">{{ brokerSyncStatusLabel }}</span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Real-time balance stream</span>
+                <span class="kv">{{ brokerSync?.subscription_active ? 'Subscribed (active)' : 'Not subscribed' }}</span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Active account ID</span>
+                <span class="kv">{{ activeBrokerAccountId || 'Unknown' }}</span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Account type</span>
+                <span class="kv">
+                  <span
+                    v-if="activeBrokerAccountType"
+                    class="account-type-badge"
+                    :class="activeBrokerAccountType === 'real' ? 'real' : 'demo'"
+                  >
+                    {{ activeBrokerAccountType.toUpperCase() }}
+                  </span>
+                  <template v-else>Unknown</template>
+                  (configured: {{ configuredDerivMode }})
+                </span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Deriv API balance</span>
+                <span class="kv">{{ brokerBalanceLabel }}</span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Last synced</span>
+                <span class="kv">{{ friendlyDateTime(brokerLastSyncedAt) }}</span>
+              </div>
+              <div class="item-row">
+                <span class="muted">Last update source</span>
+                <span class="kv">{{ brokerUpdateSourceLabel }}</span>
               </div>
               <div class="item-row">
                 <span class="muted">Token mode</span>
                 <span class="kv">{{ brokerTokenLabel }}</span>
               </div>
-              <div class="item-row">
-                <span class="muted">Account</span>
-                <span class="kv">{{ lastBrokerStatus?.loginid || lastBrokerStatus?.options_account_id || 'Unknown' }}</span>
+              <div v-if="brokerModeMismatch" class="status-banner error compact-banner">
+                Account mode mismatch: configured for <strong>{{ configuredDerivMode }}</strong>,
+                but connected account is <strong>{{ activeBrokerAccountId }} ({{ activeBrokerAccountType }})</strong>.
               </div>
-              <div class="item-row">
-                <span class="muted">Balance</span>
-                <span class="kv">
-                  {{
-                    lastBrokerStatus?.balance !== undefined
-                      ? `${lastBrokerStatus.balance} ${lastBrokerStatus.currency || ''}`.trim()
-                      : 'Unavailable'
-                  }}
-                </span>
+              <div v-if="brokerSync?.last_error" class="status-banner error compact-banner">
+                {{ brokerSync.last_error }}
               </div>
               <p class="note">
-                {{ lastBrokerStatus?.message || 'No Deriv test has been run yet for this local workspace.' }}
+                {{ lastBrokerStatus?.message || 'Deriv balance is retrieved directly from the Deriv API and never estimated from journal P&L.' }}
               </p>
             </div>
             <div class="actions">
               <button class="button" :disabled="busy" @click="testBrokerConnection">Test Deriv Connection</button>
+              <button class="button secondary" :disabled="busy || !derivTokenSaved" @click="refreshBrokerBalance">
+                Refresh Balance
+              </button>
               <button class="button secondary" :disabled="busy" @click="fetchBootstrap">Refresh Dashboard</button>
             </div>
             <div class="empty-state">

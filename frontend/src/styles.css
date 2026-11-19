@@ -1298,3 +1298,58 @@ textarea {
   width: auto;
   min-width: 160px;
 }
+
+
+.stat-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.account-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+}
+
+.account-type-badge.real {
+  background: color-mix(in srgb, var(--down, #ef4444) 16%, transparent);
+  border-color: color-mix(in srgb, var(--down, #ef4444) 45%, transparent);
+  color: var(--down, #ef4444);
+}
+
+.account-type-badge.demo {
+  background: color-mix(in srgb, var(--secondary, #38bdf8) 16%, transparent);
+  border-color: color-mix(in srgb, var(--secondary, #38bdf8) 45%, transparent);
+  color: var(--secondary, #38bdf8);
+}
+
+.broker-balance-meta {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.stat-card-actions {
+  margin-top: 10px;
+}
+
+.compact-button {
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  border-radius: 10px;
+}
+
+.compact-banner {
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
