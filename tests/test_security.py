@@ -79,10 +79,13 @@ def test_api_key_gates_everything_but_health(client, monkeypatch):
 def test_public_suggestions_are_shareable_without_api_key(client, monkeypatch):
     monkeypatch.setenv("COMMUNITY_API_KEY", "letmein")
     page = client.get("/suggestions")
+    proxied_page = client.get("/api/public/suggestions-page")
     feed = client.get("/api/public/signals")
 
     assert page.status_code == 200
     assert "Market opportunities" in page.get_data(as_text=True)
+    assert proxied_page.status_code == 200
+    assert "Market opportunities" in proxied_page.get_data(as_text=True)
     assert feed.status_code == 200
     assert set(feed.get_json()) == {"generated_at", "last_updated", "signals", "signal_count", "disclaimer"}
     assert TOKEN not in feed.get_data(as_text=True)

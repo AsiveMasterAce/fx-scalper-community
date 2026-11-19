@@ -65,7 +65,7 @@ def cors_origins() -> object:
 
 CORS(app, resources={r"/api/*": {"origins": cors_origins()}})
 
-PUBLIC_API_PATHS = {"/api/health", "/api/public/signals"}
+PUBLIC_API_PATHS = {"/api/health", "/api/public/signals", "/api/public/suggestions-page"}
 
 
 @app.before_request
@@ -1239,6 +1239,7 @@ def bootstrap():
 
 
 @app.get("/suggestions")
+@app.get("/api/public/suggestions-page")
 def public_suggestions_page():
     """Read-only share view. Trading controls and private broker data are intentionally absent."""
     return render_template("suggestions.html")
