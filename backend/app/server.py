@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, render_template, request
 from flask_cors import CORS
 
 from app.deriv_service import (
@@ -65,7 +65,7 @@ def cors_origins() -> object:
 
 CORS(app, resources={r"/api/*": {"origins": cors_origins()}})
 
-PUBLIC_API_PATHS = {"/api/health"}
+PUBLIC_API_PATHS = {"/api/health", "/api/public/signals"}
 
 
 @app.before_request
@@ -1238,6 +1238,41 @@ def bootstrap():
     return jsonify(bootstrap_payload(load_state()))
 
 
+@app.get("/suggestions")
+def public_suggestions_page():
+    """Read-only share view. Trading controls and private broker data are intentionally absent."""
+    return render_template("suggestions.html")
+
+
+@app.get("/api/public/signals")
+def public_signals():
+    """Return only the fields needed by the public, read-only suggestions page."""
+    state = load_state()
+    market = market_view(state.get("settings", {}))
+    signals = []
+    public_fields = (
+        "symbol", "asset_class", "decision", "price", "regime", "stop_loss",
+        "take_profit", "risk_reward_ratio", "reason", "trade_plan",
+        "exit_recommendation_basis",
+    )
+    for row in market:
+        if row.get("decision") == "HOLD":
+            continue
+        signals.append({key: row.get(key) for key in public_fields})
+    last_scan = state.get("last_scan") or {}
+    response = jsonify(
+        {
+            "generated_at": utc_now_iso(),
+            "last_updated": last_scan.get("finished_at") or last_scan.get("started_at"),
+            "signals": signals,
+            "signal_count": len(signals),
+            "disclaimer": "Market suggestions are informational, not financial advice. Verify every trade before acting.",
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/api/rules")
 def rules():
     return jsonify({"rules": RULES})
@@ -1757,7 +1792,7 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
         else:
             exposure, note = open_paper_auto_trade(state, signal)
         auto["trades_today"] = int(auto["trades_today"]) + 1
-        auto_event(state, "AUTO_OPEN", symbol, side, exposure, note)
+        auto_event(state, "LIVE_OPEN" if auto["mode"] == "live" else "AUTO_OPEN", symbol, side, exposure, note)
         if blocking_reason(auto, settings, now)[0]:
             break
 

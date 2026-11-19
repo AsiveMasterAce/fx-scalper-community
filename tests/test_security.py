@@ -76,6 +76,18 @@ def test_api_key_gates_everything_but_health(client, monkeypatch):
     assert client.get("/api/bootstrap", headers={"X-API-Key": "letmein"}).status_code == 200
 
 
+def test_public_suggestions_are_shareable_without_api_key(client, monkeypatch):
+    monkeypatch.setenv("COMMUNITY_API_KEY", "letmein")
+    page = client.get("/suggestions")
+    feed = client.get("/api/public/signals")
+
+    assert page.status_code == 200
+    assert "Market opportunities" in page.get_data(as_text=True)
+    assert feed.status_code == 200
+    assert set(feed.get_json()) == {"generated_at", "last_updated", "signals", "signal_count", "disclaimer"}
+    assert TOKEN not in feed.get_data(as_text=True)
+
+
 def test_cors_only_allows_local_dashboard_origins_by_default(client):
     allowed = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
     assert allowed.headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"

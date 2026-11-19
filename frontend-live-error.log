@@ -1,0 +1,4 @@
+11:36:18 [vite] http proxy error: /api/bootstrap
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)

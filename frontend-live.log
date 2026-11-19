@@ -1,0 +1,10 @@
+
+> market-ops-community-frontend@0.1.0 dev
+> vite --host 0.0.0.0 --port 5173
+
+
+  VITE v6.4.5  ready in 6515 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: http://192.168.8.161:5173/
+11:35:37 [vite] (client) hmr update /src/App.vue

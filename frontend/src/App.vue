@@ -348,6 +348,28 @@ const ACTIVITY_LABELS = {
 function activityLabel(type) {
   return ACTIVITY_LABELS[type] || String(type || 'Activity').replaceAll('_', ' ').toLowerCase()
 }
+function activityMoneyKind(entry) {
+  const type = String(entry?.type || '').toUpperCase()
+  const note = String(entry?.note || '')
+  if (type.startsWith('LIVE_') || /^Live\b/i.test(note) || /\bcontract\s+\S+\s+settled\b/i.test(note)) {
+    return 'live'
+  }
+  if (['AUTO_OPEN', 'AUTO_CLOSE', 'PAPER_OPEN', 'PAPER_CLOSE'].includes(type) || /\bpaper\b/i.test(note)) {
+    return 'practice'
+  }
+  return ''
+}
+function activityDisplayLabel(entry) {
+  const kind = activityMoneyKind(entry)
+  if (kind === 'live' && entry.type === 'AUTO_OPEN') return 'Live trade opened'
+  return activityLabel(entry.type)
+}
+function activityAmountLabel(entry) {
+  const kind = activityMoneyKind(entry)
+  if (kind === 'live') return 'Live stake'
+  if (kind === 'practice') return 'Virtual exposure'
+  return 'Recorded amount'
+}
 function activityPnl(entry) {
   const match = String(entry?.note || '').match(/P&L\s*([+-]?\d+(?:\.\d+)?)/i)
   return match ? Number(match[1]) : null
@@ -1797,16 +1819,16 @@ onMounted(fetchBootstrap)
         <article v-show="tab === 'signals'" class="card section-card recent-activity-card">
           <div class="section-head">
             <h2>Recent Activity</h2>
-            <p>The latest paper-trade and rebalance events. The full history is kept in the CSV journal.</p>
+            <p>Practice and live activity are labelled separately. Practice exposure is virtual; live stake is broker money at risk.</p>
             <button class="button secondary" type="button" @click="exportJournal">Export CSV</button>
           </div>
           <div class="section-body activity-table-scroll">
             <table class="activity-table">
-              <thead><tr><th>Activity</th><th>Date</th><th>Market</th><th>Side</th><th class="num">Trade size</th><th class="num">Result</th><th>Details</th></tr></thead>
+              <thead><tr><th>Activity</th><th>Date</th><th>Market</th><th>Side</th><th class="num">Amount</th><th class="num">Result</th><th>Details</th></tr></thead>
               <tbody>
                 <tr v-for="entry in tradeHistory" :key="`${entry.timestamp}-${entry.symbol}-${entry.type}`" :class="activityOutcome(entry) ? `activity-${activityOutcome(entry)}` : ''">
                   <td>
-                    <strong>{{ activityLabel(entry.type) }}</strong>
+                    <strong>{{ activityDisplayLabel(entry) }}</strong>
                     <span v-if="activityOutcome(entry)" class="result-badge" :class="activityOutcome(entry)">
                       {{ activityOutcome(entry) === 'profit' ? 'Closed in profit' : activityOutcome(entry) === 'loss' ? 'Closed at a loss' : 'Closed even' }}
                     </span>
@@ -1814,7 +1836,10 @@ onMounted(fetchBootstrap)
                   <td class="nowrap muted">{{ friendlyDateTime(entry.timestamp) }}</td>
                   <td class="nowrap">{{ entry.symbol || 'App' }}</td>
                   <td>{{ entry.side || '—' }}</td>
-                  <td class="num nowrap">{{ formatCurrency(entry.exposure) }}</td>
+                  <td class="num nowrap">
+                    <strong>{{ formatCurrency(entry.exposure) }}</strong>
+                    <span class="market-regime">{{ activityAmountLabel(entry) }}</span>
+                  </td>
                   <td class="num nowrap activity-result" :class="activityOutcome(entry)">{{ activityResult(entry) }}</td>
                   <td class="activity-note" :title="entry.note">{{ entry.note }}</td>
                 </tr>
