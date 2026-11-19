@@ -1781,7 +1781,13 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
                 trade = broker.open_trade(symbol=symbol, side=side, amount=stake)
             except BrokerError as exc:
                 auto["last_error"] = str(exc)
-                auto_event(state, "AUTO_ERROR", symbol, side, stake, str(exc))
+                duration = settings.get("live_trade_duration", 5)
+                unit = settings.get("live_trade_duration_unit", "t")
+                units = {"t": "ticks", "s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+                auto_event(
+                    state, "AUTO_ERROR", symbol, side, stake,
+                    f"Live trade rejected using {duration} {units.get(str(unit), unit)}: {exc}",
+                )
                 continue
             exposure = trade["price"]
             auto["pending_live"].append(
@@ -1876,7 +1882,7 @@ def set_auto_running(running: bool, mode: str = "paper") -> dict:
             auto.update({"mode": mode, "started_at": utc_now_iso(), "last_error": ""})
             auto_event(state, "AUTO_START", note=f"Auto-trader started in {mode} mode.")
         elif was_running:
-            auto_event(state, "AUTO_STOP", note="Auto-trader stopped.")
+            auto_event(state, "AUTO_STOP", note=f"Auto-trader stopped ({auto.get('mode', 'paper')} mode).")
         save_state(state)
         return auto
 

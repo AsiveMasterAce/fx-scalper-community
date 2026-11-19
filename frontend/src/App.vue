@@ -336,10 +336,12 @@ const scanStatusMessage = computed(() => {
   return `Checked ${lastScan.value.scanned || 0} of ${lastScan.value.configured_symbols || 0} markets successfully.`
 })
 const ACTIVITY_LABELS = {
-  AUTO_START: 'Automatic practice started',
-  AUTO_STOP: 'Automatic practice stopped',
+  AUTO_START: 'Automatic trading started',
+  AUTO_STOP: 'Automatic trading stopped',
   AUTO_OPEN: 'Practice trade opened',
   AUTO_CLOSE: 'Practice trade closed',
+  AUTO_ERROR: 'Live trade rejected',
+  LIVE_ERROR: 'Live trade rejected',
   LIVE_OPEN: 'Real-money trade opened',
   LIVE_SETTLED: 'Real-money trade finished',
   PAPER_OPEN: 'Practice trade opened',
@@ -351,20 +353,23 @@ function activityLabel(type) {
 function activityMoneyKind(entry) {
   const type = String(entry?.type || '').toUpperCase()
   const note = String(entry?.note || '')
-  if (type.startsWith('LIVE_') || /^Live\b/i.test(note) || /\bcontract\s+\S+\s+settled\b/i.test(note)) {
+  if (type.startsWith('LIVE_') || type === 'AUTO_ERROR' || /\blive mode\b/i.test(note) || /^Live\b/i.test(note) || /\bcontract\s+\S+\s+settled\b/i.test(note)) {
     return 'live'
   }
-  if (['AUTO_OPEN', 'AUTO_CLOSE', 'PAPER_OPEN', 'PAPER_CLOSE'].includes(type) || /\bpaper\b/i.test(note)) {
+  if (['AUTO_OPEN', 'AUTO_CLOSE', 'PAPER_OPEN', 'PAPER_CLOSE'].includes(type) || /\bpaper(?: mode)?\b/i.test(note)) {
     return 'practice'
   }
   return ''
 }
 function activityDisplayLabel(entry) {
   const kind = activityMoneyKind(entry)
+  if (entry.type === 'AUTO_START') return kind === 'live' ? 'Automatic live trading started' : 'Automatic practice started'
+  if (entry.type === 'AUTO_STOP') return kind === 'live' ? 'Automatic live trading stopped' : kind === 'practice' ? 'Automatic practice stopped' : 'Automatic trading stopped'
   if (kind === 'live' && entry.type === 'AUTO_OPEN') return 'Live trade opened'
   return activityLabel(entry.type)
 }
 function activityAmountLabel(entry) {
+  if (['AUTO_START', 'AUTO_STOP', 'AUTO_HALT', 'DAILY_SUMMARY'].includes(String(entry?.type || '').toUpperCase())) return ''
   const kind = activityMoneyKind(entry)
   if (kind === 'live') return 'Live stake'
   if (kind === 'practice') return 'Virtual exposure'
@@ -1837,8 +1842,11 @@ onMounted(fetchBootstrap)
                   <td class="nowrap">{{ entry.symbol || 'App' }}</td>
                   <td>{{ entry.side || '—' }}</td>
                   <td class="num nowrap">
-                    <strong>{{ formatCurrency(entry.exposure) }}</strong>
-                    <span class="market-regime">{{ activityAmountLabel(entry) }}</span>
+                    <template v-if="activityAmountLabel(entry)">
+                      <strong>{{ formatCurrency(entry.exposure) }}</strong>
+                      <span class="market-regime">{{ activityAmountLabel(entry) }}</span>
+                    </template>
+                    <span v-else>—</span>
                   </td>
                   <td class="num nowrap activity-result" :class="activityOutcome(entry)">{{ activityResult(entry) }}</td>
                   <td class="activity-note" :title="entry.note">{{ entry.note }}</td>
