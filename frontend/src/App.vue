@@ -332,7 +332,7 @@ async function forgetBinanceKeys() {
 
 async function syncLivePositions() {
   await runAction(
-    () => api.post('/api/live-positions/sync'),
+    () => api.post('live-positions/sync'),
     'Synced open trades from Deriv.',
   )
 }
@@ -1630,6 +1630,13 @@ onMounted(fetchBootstrap)
               </summary>
               <div class="ux-card-body">
                 <div class="form-grid">
+                  <div class="field full-span">
+                    <label class="checkbox-row">
+                      <input v-model="settingsForm.live_trading_enabled" type="checkbox" />
+                      <span>Real-money live trading enabled</span>
+                    </label>
+                    <small class="field-help">Must be checked and saved before starting real-money automation.</small>
+                  </div>
                   <div class="field">
                     <label>How selective should entries be?</label>
                     <select v-model="settingsForm.risk_profile" class="select">
