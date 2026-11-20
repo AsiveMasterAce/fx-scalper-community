@@ -415,21 +415,26 @@ class DerivCommunityClient:
         symbol: str,
         contract_type: str,
         amount: float,
-        duration: int,
-        duration_unit: str,
+        duration: Optional[int] = None,
+        duration_unit: Optional[str] = None,
         currency: str,
         basis: str = "stake",
+        multiplier: Optional[int] = None,
     ) -> dict:
-        payload = {
+        ctype = str(contract_type).strip().upper()
+        payload: dict = {
             "proposal": 1,
             "amount": float(amount),
             "basis": basis,
-            "contract_type": str(contract_type).strip().upper(),
+            "contract_type": ctype,
             "currency": str(currency).strip().upper(),
-            "duration": int(duration),
-            "duration_unit": str(duration_unit).strip().lower(),
             "underlying_symbol": str(symbol).strip(),
         }
+        if ctype in {"MULTUP", "MULTDOWN"}:
+            payload["multiplier"] = int(multiplier or 100)
+        else:
+            payload["duration"] = int(duration or 5)
+            payload["duration_unit"] = str(duration_unit or "t").strip().lower()
         try:
             return self.send(payload).get("proposal") or {}
         except DerivServiceError as exc:
@@ -444,6 +449,11 @@ class DerivCommunityClient:
 
     def sell_contract(self, contract_id: int | str, price: float = 0.0) -> dict:
         return self.send({"sell": int(contract_id), "price": float(price)}).get("sell") or {}
+
+    def get_open_contracts(self) -> list[dict]:
+        portfolio = self.send({"portfolio": 1}).get("portfolio") or {}
+        rows = portfolio.get("contracts")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
 def _deriv_settings_signature(settings: dict) -> tuple:

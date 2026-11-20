@@ -221,6 +221,48 @@ class ScanResult:
         return bool(self.snapshots)
 
 
+def resample_candles(candles: Sequence[Candle], factor: int) -> List[Candle]:
+    """Group consecutive base candles into higher-timeframe bars."""
+    step = max(1, int(factor))
+    if step <= 1 or len(candles) < step:
+        return list(candles)
+    remainder = len(candles) % step
+    aligned = candles[remainder:]
+    grouped: List[Candle] = []
+    for idx in range(0, len(aligned), step):
+        chunk = aligned[idx:idx + step]
+        vols = [bar.volume for bar in chunk if bar.volume is not None]
+        grouped.append(
+            Candle(
+                epoch=chunk[-1].epoch,
+                open=chunk[0].open,
+                high=max(bar.high for bar in chunk),
+                low=min(bar.low for bar in chunk),
+                close=chunk[-1].close,
+                volume=sum(vols) if len(vols) == len(chunk) else None,
+            )
+        )
+    return grouped
+
+
+def higher_timeframe_trend(candles: Sequence[Candle], config: Optional[IndicatorSettings] = None) -> str:
+    """Classify higher-timeframe trend direction: 'BUY', 'SELL', or 'NEUTRAL'."""
+    config = config or IndicatorSettings()
+    if len(candles) < config.ema_slow_period:
+        return "NEUTRAL"
+    closes = [bar.close for bar in candles]
+    fast = indicators.last(indicators.ema(closes, config.ema_fast_period))
+    slow = indicators.last(indicators.ema(closes, config.ema_slow_period))
+    if fast is None or slow is None:
+        return "NEUTRAL"
+    price = float(closes[-1])
+    if fast > slow and price >= slow:
+        return "BUY"
+    if fast < slow and price <= slow:
+        return "SELL"
+    return "NEUTRAL"
+
+
 def build_market_snapshots(
     symbols: Sequence[object],
     settings: Optional[Mapping],
@@ -234,10 +276,16 @@ def build_market_snapshots(
     plain strings. A symbol that fails is reported in ScanResult.errors rather
     than silently dropped.
     """
+    settings = settings or {}
     config = IndicatorSettings.from_settings(settings)
     granularity = validate_granularity(granularity)
     needed = minimum_candles(config)
     requested = int(count) if count else max(needed * 2, 200)
+    mtf_enabled = bool(settings.get("mtf_confirm_enabled", False))
+    try:
+        htf_granularity = validate_granularity(settings.get("mtf_granularity") or 900)
+    except MarketDataError:
+        htf_granularity = 900
     result = ScanResult()
     for entry in symbols or []:
         if isinstance(entry, Mapping):
@@ -250,7 +298,23 @@ def build_market_snapshots(
             continue
         try:
             candles = provider.get_candles(symbol, granularity=granularity, count=requested)
-            result.snapshots.append(build_snapshot(symbol, asset_class, candles, config))
+            snap = build_snapshot(symbol, asset_class, candles, config)
+            if mtf_enabled and htf_granularity > granularity:
+                htf_candles: Sequence[Candle] = []
+                try:
+                    htf_candles = provider.get_candles(
+                        symbol,
+                        granularity=htf_granularity,
+                        count=max(config.ema_slow_period * 3, 60),
+                    )
+                except Exception:
+                    htf_candles = []
+                if len(htf_candles) < config.ema_slow_period:
+                    factor = max(2, int(round(htf_granularity / granularity)))
+                    htf_candles = resample_candles(candles, factor)
+                snap["htf_trend"] = higher_timeframe_trend(htf_candles, config)
+                snap["htf_granularity"] = htf_granularity
+            result.snapshots.append(snap)
         except MarketDataError as error:
             result.errors.append({"symbol": symbol, "error": str(error)})
         except Exception as error:

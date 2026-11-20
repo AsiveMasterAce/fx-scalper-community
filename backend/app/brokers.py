@@ -54,6 +54,10 @@ class LiveBroker:
         """Sell an open contract early before expiry. Returns {"profit": float, "sold_for": float}."""
         raise BrokerError(f"{self.name} does not support early contract exit.")
 
+    def open_contracts(self) -> list:
+        """Fetch currently open live contracts from the broker (for post-deploy recovery)."""
+        return []
+
     def refresh_balance(self, *, source: str = "refresh") -> Optional[dict]:
         """Fetch an authoritative account/balance snapshot from the broker if supported."""
         return None
@@ -106,7 +110,13 @@ class DerivBroker(LiveBroker):
     def open_trade(self, *, symbol: str, side: str, amount: float, **options) -> dict:
         try:
             account = self._connected()
-            contract_type = options.get("contract_type") or ("CALL" if side == "BUY" else "PUT")
+            mode = str(options.get("contract_mode") or self.settings.get("deriv_contract_mode") or "rise_fall").strip().lower()
+            if options.get("contract_type"):
+                contract_type = str(options["contract_type"]).strip().upper()
+            elif mode == "multiplier":
+                contract_type = "MULTUP" if side == "BUY" else "MULTDOWN"
+            else:
+                contract_type = "CALL" if side == "BUY" else "PUT"
             proposal = self.client.propose(
                 symbol=symbol,
                 contract_type=contract_type,
@@ -114,6 +124,7 @@ class DerivBroker(LiveBroker):
                 duration=int(options.get("duration") or self.settings.get("live_trade_duration", 5)),
                 duration_unit=str(options.get("duration_unit") or self.settings.get("live_trade_duration_unit", "t")),
                 currency=str(options.get("currency") or self.settings.get("live_trade_currency", "USD")),
+                multiplier=int(options.get("multiplier") or self.settings.get("deriv_multiplier", 100)),
             )
             proposal_id = str(proposal.get("id") or proposal.get("proposal_id") or "").strip()
             if not proposal_id:
@@ -196,6 +207,40 @@ class DerivBroker(LiveBroker):
             "contract_id": str(sold.get("contract_id") or ref),
             "raw": sold,
         }
+
+    def open_contracts(self) -> list:
+        from datetime import datetime, timezone
+
+        try:
+            self._connected()
+            rows = self.client.get_open_contracts()
+        except DerivServiceError as exc:
+            raise BrokerError(str(exc)) from exc
+        recovered = []
+        for row in rows:
+            cid = str(row.get("contract_id") or "").strip()
+            symbol = str(row.get("symbol") or row.get("underlying") or "").strip()
+            if not cid or not symbol:
+                continue
+            ctype = str(row.get("contract_type") or "").upper()
+            side = "BUY" if ctype in {"CALL", "CALLE", "RISE", "MULTUP"} else "SELL"
+            stake = self._opt_float(row.get("buy_price")) or 0.0
+            epoch = row.get("purchase_time")
+            try:
+                opened_at = datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except (TypeError, ValueError):
+                opened_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            recovered.append(
+                {
+                    "ref": cid,
+                    "symbol": symbol,
+                    "side": side,
+                    "stake": round(stake, 2),
+                    "opened_at": opened_at,
+                    "position": None,
+                }
+            )
+        return recovered
 
     def close(self) -> None:
         self.client.close()

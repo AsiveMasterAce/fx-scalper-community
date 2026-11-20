@@ -1353,3 +1353,202 @@ textarea {
   padding: 8px 10px;
   font-size: 0.8rem;
 }
+
+
+/* UX-Law grouped Settings cards, presets, full-width toggles, and sticky save bar */
+.preset-bar {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--secondary) 6%, transparent);
+}
+.preset-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.preset-bar-head strong { font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; }
+.preset-bar-head span { font-size: 12px; color: var(--muted); }
+.preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.preset-chip {
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.preset-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.ux-card {
+  margin: 0 0 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-soft) 60%, transparent);
+}
+.ux-card > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.ux-card > summary::-webkit-details-marker { display: none; }
+.ux-card-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ux-chevron {
+  width: 14px;
+  height: 14px;
+  opacity: 0.6;
+  transition: transform 0.16s ease;
+}
+.ux-card[open] > summary .ux-chevron {
+  transform: rotate(180deg);
+}
+.ux-card-title {
+  display: grid;
+  gap: 3px;
+}
+.ux-card-title strong {
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.ux-card-title span { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.ux-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.ux-pill.active {
+  border-color: color-mix(in srgb, #22c55e 45%, transparent);
+  background: color-mix(in srgb, #22c55e 12%, transparent);
+  color: #16a34a;
+}
+.ux-card-body {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 16px;
+}
+.ux-card-body .form-grid {
+  gap: 16px 14px;
+  align-items: start;
+}
+.ux-card-body .field {
+  align-content: start;
+  gap: 6px;
+}
+.ux-card-body .field > label:not(.checkbox-row) {
+  min-height: 28px;
+  display: flex;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+.field.full-span {
+  grid-column: 1 / -1;
+}
+.inline-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px;
+}
+.mini-field {
+  display: grid;
+  gap: 4px;
+}
+.mini-field span {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-size: 13px !important;
+  font-weight: 600;
+  color: var(--text) !important;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.checkbox-row:hover {
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.checkbox-row input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+.toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.toggle-row .check-line {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.ux-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.sticky-save-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 10;
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  box-shadow: 0 10px 28px rgba(2, 6, 23, 0.18);
+}

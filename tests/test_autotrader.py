@@ -293,6 +293,15 @@ def test_winning_scale_in_stacks_only_on_winners_with_spacing():
     picks = autotrader.pick_entries(market, winning, settings, 1, now=NOW)
     assert [row["symbol"] for row in picks] == ["frxXAUUSD"]
 
+    # Old trade winning, but MOST RECENT trade is losing -> do NOT stack into a pullback!
+    pullback_stack = [
+        {"symbol": "frxXAUUSD", "side": "BUY", "stake": 1.0, "unrealized_profit": 0.30,
+         "opened_at": autotrader.iso(NOW - timedelta(minutes=30))},
+        {"symbol": "frxXAUUSD", "side": "BUY", "stake": 1.0, "unrealized_profit": -0.10,
+         "opened_at": autotrader.iso(NOW - timedelta(minutes=8))},
+    ]
+    assert autotrader.pick_entries(market, pullback_stack, {**settings, "max_positions_per_symbol": 3}, 2, now=NOW) == []
+
     # Already at max_positions_per_symbol -> stop stacking
     assert autotrader.pick_entries(market, winning + winning, settings, 2, now=NOW) == []
 
@@ -451,3 +460,130 @@ def test_stop_and_reverse_flips_on_reversal(client, monkeypatch):
     assert GuardianFakeBroker.sold_refs == ["300"]
     assert auto["flips_today"] == 1
     assert len(auto["pending_live"]) == 1 and auto["pending_live"][0]["side"] == decision
+
+
+def test_anchor_and_scalp_exit_rules():
+    settings = {
+        "active_exit_enabled": True,
+        "early_take_profit_pct": 55.0,
+        "scalp_take_profit_pct": 30.0,
+        "spike_grab_enabled": True,
+        "spike_grab_min_profit_pct": 25.0,
+        "trailing_profit_enabled": True,
+        "trailing_arm_pct": 40.0,
+        "trailing_pullback_pct": 12.0,
+    }
+    stretched = {"decision": "BUY", "candle_quality": "stretched", "distance_to_band": 0.9}
+    # Anchor skips small spike grab at +30% so it can ride the bigger trend
+    anchor = {"symbol": "frxXAUUSD", "side": "BUY", "stake": 1.0, "role": "anchor"}
+    assert autotrader.evaluate_early_exit(anchor, {"is_valid_to_sell": True, "unrealized_profit": 0.30}, stretched, settings) is None
+    # Scalp banks profit immediately at its quicker 30% scalp TP
+    scalp = {"symbol": "frxXAUUSD", "side": "BUY", "stake": 1.0, "role": "scalp"}
+    reason = autotrader.evaluate_early_exit(scalp, {"is_valid_to_sell": True, "unrealized_profit": 0.30}, stretched, settings)
+    assert reason and "Scalp take-profit" in reason
+
+
+def test_mtf_confirmation_blocks_counter_trend_entries():
+    snap = {
+        "symbol": "frxXAUUSD",
+        "asset_class": "FOREX",
+        "price": 2650.0,
+        "ema_fast": 2648.0,
+        "ema_slow": 2640.0,
+        "adx": 30.0,
+        "rsi": 58.0,
+        "atr": 4.0,
+        "atr_ratio": 1.1,
+        "price_vs_vwap": "above",
+        "candle_quality": "clean",
+        "distance_to_band": 0.4,
+        "htf_trend": "SELL",
+    }
+    # Without MTF confirm -> BUY
+    assert server.evaluate_snapshot(snap, {"risk_profile": "balanced", "mtf_confirm_enabled": False})["decision"] == "BUY"
+    # With MTF confirm enabled and HTF = SELL -> blocked to HOLD
+    blocked = server.evaluate_snapshot(snap, {"risk_profile": "balanced", "mtf_confirm_enabled": True})
+    assert blocked["decision"] == "HOLD" and "higher-timeframe" in blocked["reason"]
+    # Aligned HTF = BUY -> allowed
+    aligned = server.evaluate_snapshot({**snap, "htf_trend": "BUY"}, {"risk_profile": "balanced", "mtf_confirm_enabled": True})
+    assert aligned["decision"] == "BUY"
+
+
+def test_clamp_duration_before_market_close():
+    # 19:00 UTC (21:00 SAST) -> 120m until 21:00 UTC close, minus 10m buffer = 110m available
+    now_eve = datetime(2026, 11, 20, 19, 0, tzinfo=timezone.utc)
+    cfg = {"auto_clamp_duration_enabled": True, "market_close_hour_utc": 21}
+    dur, unit, clamped = autotrader.clamp_duration_before_close(5, "h", now_eve, cfg)
+    assert clamped is True and unit == "m" and dur == 110
+
+    # 10:00 UTC -> 11h remaining, 5h fits with no clamp
+    now_day = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+    dur2, unit2, clamped2 = autotrader.clamp_duration_before_close(5, "h", now_day, cfg)
+    assert clamped2 is False and unit2 == "h" and dur2 == 5
+
+
+def test_guardian_backtest_simulation(client):
+    resp = client.post(
+        "/api/backtests/run",
+        json={"payout_pct": 72, "candle_count": 1000, "horizon_bars": 10, "use_guardian": True},
+    )
+    assert resp.status_code == 200
+    bt = server.load_state()["last_backtest"]["candle_backtest"]
+    assert bt["use_guardian"] is True
+    result = bt["results"][0]
+    assert result["trades"] > 0
+    assert result["guardian_summary"]["enabled"] is True
+    assert sum(result["guardian_summary"]["exit_reasons"].values()) == result["trades"]
+
+
+def test_sync_open_live_positions_recovers_after_wipe(client, monkeypatch):
+    class SyncFakeBroker(GuardianFakeBroker):
+        def open_contracts(self):
+            return [
+                {"ref": "9991", "symbol": "frxXAUUSD", "side": "SELL", "stake": 0.5, "opened_at": autotrader.iso(NOW), "position": None}
+            ]
+
+    GuardianFakeBroker.unrealized = 0.24
+    GuardianFakeBroker.valid_to_sell = True
+    monkeypatch.setattr(server, "live_broker_from_settings", lambda settings: SyncFakeBroker())
+    resp = client.post("/api/live-positions/sync")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["added"] == 1
+    pending = payload["auto_trader"]["pending_live"]
+    assert len(pending) == 1 and pending[0]["ref"] == "9991"
+    assert pending[0]["unrealized_profit"] == 0.24
+    assert pending[0]["is_valid_to_sell"] is True
+
+
+def test_public_signals_include_three_tps_sls_and_mt5_entries(client):
+    assert client.post("/api/scan").status_code == 200
+    resp = client.get("/api/public/signals")
+    assert resp.status_code == 200
+    sigs = resp.get_json()["signals"]
+    assert len(sigs) >= 1
+    sig = sigs[0]
+    assert set(sig["take_profits"].keys()) == {"tp1", "tp2", "tp3"}
+    assert set(sig["stop_losses"].keys()) == {"sl1", "sl2", "sl3"}
+    assert len(sig["mt5_entries"]) == 3
+    if sig["decision"] == "BUY":
+        assert sig["take_profits"]["tp1"] < sig["take_profits"]["tp2"] < sig["take_profits"]["tp3"]
+        assert sig["stop_losses"]["sl1"] > sig["stop_losses"]["sl2"] > sig["stop_losses"]["sl3"]
+        assert sig["mt5_entries"][0]["entry"] > sig["mt5_entries"][1]["entry"] > sig["mt5_entries"][2]["entry"]
+    else:
+        assert sig["take_profits"]["tp1"] > sig["take_profits"]["tp2"] > sig["take_profits"]["tp3"]
+        assert sig["stop_losses"]["sl1"] < sig["stop_losses"]["sl2"] < sig["stop_losses"]["sl3"]
+        assert sig["mt5_entries"][0]["entry"] < sig["mt5_entries"][1]["entry"] < sig["mt5_entries"][2]["entry"]
+
+
+def test_deriv_multiplier_proposal_omits_duration_and_sets_multiplier():
+    from app.deriv_service import DerivCommunityClient
+
+    sent = []
+    client = DerivCommunityClient(app_id="1089", token="fake")
+    client.send = lambda payload, **kw: (sent.append(payload), {"proposal": {"id": "p1", "ask_price": 1.0}})[1]
+    client.propose(symbol="frxXAUUSD", contract_type="MULTUP", amount=1.0, currency="USD", multiplier=200)
+    assert len(sent) == 1
+    assert sent[0]["contract_type"] == "MULTUP"
+    assert sent[0]["multiplier"] == 200
+    assert "duration" not in sent[0] and "duration_unit" not in sent[0]

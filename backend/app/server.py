@@ -29,6 +29,7 @@ from app.market_data import (
 )
 from app.autotrader import (
     blocking_reason,
+    clamp_duration_before_close,
     day_summary,
     default_auto_state,
     due_positions,
@@ -243,6 +244,16 @@ DEFAULT_STATE = {
         "dynamic_stake_pct": 2.0,
         "dynamic_stake_min": 0.50,
         "dynamic_stake_max": 5.0,
+        "anchor_scalp_enabled": False,
+        "scalp_duration": 30,
+        "scalp_duration_unit": "m",
+        "scalp_take_profit_pct": 30.0,
+        "mtf_confirm_enabled": False,
+        "mtf_granularity": 900,
+        "auto_clamp_duration_enabled": False,
+        "market_close_hour_utc": 21,
+        "deriv_contract_mode": "rise_fall",
+        "deriv_multiplier": 100,
     },
     "portfolio": [],
     "trade_history": [],
@@ -633,12 +644,15 @@ def classify_regime(snapshot: dict, thresholds: dict[str, float]) -> str:
 
 
 def recommended_exit_levels(snapshot: dict, decision: str) -> dict:
-    """Return educational ATR-based exit levels for a qualified signal."""
+    """Return educational ATR-based exit levels (3 TPs, 3 SLs, and 3 MT5 entry plans) for a qualified signal."""
     if decision not in {"BUY", "SELL"}:
         return {
             "stop_loss": None,
             "take_profit": None,
             "risk_reward_ratio": None,
+            "stop_losses": None,
+            "take_profits": None,
+            "mt5_entries": [],
             "exit_recommendation_basis": None,
         }
     price = float(snapshot.get("price") or 0.0)
@@ -648,15 +662,57 @@ def recommended_exit_levels(snapshot: dict, decision: str) -> dict:
             "stop_loss": None,
             "take_profit": None,
             "risk_reward_ratio": None,
+            "stop_losses": None,
+            "take_profits": None,
+            "mt5_entries": [],
             "exit_recommendation_basis": "Unavailable because ATR data is missing.",
         }
     risk_distance = 1.5 * atr_value
     direction = 1.0 if decision == "BUY" else -1.0
+    sl1 = round(price - direction * (1.0 * atr_value), 5)
+    sl2 = round(price - direction * risk_distance, 5)
+    sl3 = round(price - direction * (2.25 * atr_value), 5)
+    tp1 = round(price + direction * (1.5 * atr_value), 5)
+    tp2 = round(price + direction * (risk_distance * 2.0), 5)
+    tp3 = round(price + direction * (4.5 * atr_value), 5)
+    entry1 = round(price, 5)
+    entry2 = round(price - direction * (0.5 * atr_value), 5)
+    entry3 = round(price - direction * (1.0 * atr_value), 5)
+    limit_type = "BUY LIMIT" if decision == "BUY" else "SELL LIMIT"
+    mt5_entries = [
+        {
+            "label": "Entry 1 · Market (Quick)",
+            "order_type": decision,
+            "entry": entry1,
+            "stop_loss": sl1,
+            "take_profit": tp1,
+            "risk_reward": 1.5,
+        },
+        {
+            "label": "Entry 2 · Pullback Limit (Main)",
+            "order_type": limit_type,
+            "entry": entry2,
+            "stop_loss": sl2,
+            "take_profit": tp2,
+            "risk_reward": 3.5,
+        },
+        {
+            "label": "Entry 3 · Deep Retest Limit (Runner)",
+            "order_type": limit_type,
+            "entry": entry3,
+            "stop_loss": sl3,
+            "take_profit": tp3,
+            "risk_reward": 4.4,
+        },
+    ]
     return {
-        "stop_loss": round(price - direction * risk_distance, 5),
-        "take_profit": round(price + direction * risk_distance * 2.0, 5),
+        "stop_loss": sl2,
+        "take_profit": tp2,
         "risk_reward_ratio": 2.0,
-        "exit_recommendation_basis": "ATR-based: 1.5× ATR risk with a 2:1 reward-to-risk target.",
+        "stop_losses": {"sl1": sl1, "sl2": sl2, "sl3": sl3},
+        "take_profits": {"tp1": tp1, "tp2": tp2, "tp3": tp3},
+        "mt5_entries": mt5_entries,
+        "exit_recommendation_basis": "ATR-based: 3 scaled entries, 3 SL levels (1.0× / 1.5× / 2.25× ATR), and 3 TP targets (1.5× / 3.0× / 4.5× ATR).",
     }
 
 
@@ -732,6 +788,11 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
         reason = "ATR compression suggests low opportunity quality."
     elif stretched:
         reason = "Overextension guard blocked a late or stretched entry."
+    htf_trend = str(snapshot.get("htf_trend") or "").upper()
+    if settings.get("mtf_confirm_enabled", False) and decision in {"BUY", "SELL"} and htf_trend:
+        if htf_trend != decision:
+            reason = f"Blocked by higher-timeframe trend (HTF is {htf_trend})."
+            decision = "HOLD"
     exits = recommended_exit_levels(snapshot, decision)
     trade_plan = plain_language_trade_plan(snapshot, decision, exits)
     return {
@@ -922,6 +983,7 @@ def candle_backtest(settings: dict, options: dict) -> dict:
     payout = clamp_float(options.get("payout_pct"), 0.0, 0.0, 500.0) / 100.0
     default_fee = 0.1 if str(settings.get("market_source")) == "binance" else 0.0
     fee = clamp_float(options.get("fee_pct", default_fee), default_fee, 0.0, 5.0)
+    use_guardian = bool(options.get("use_guardian", False))
     report = {
         "source": str(settings.get("market_source") or "deriv"),
         "granularity": granularity,
@@ -929,6 +991,7 @@ def candle_backtest(settings: dict, options: dict) -> dict:
         "requested_candles": count,
         "payout_pct": round(payout * 100, 2),
         "fee_pct": fee,
+        "use_guardian": use_guardian,
         "results": [],
         "errors": [],
     }
@@ -957,6 +1020,7 @@ def candle_backtest(settings: dict, options: dict) -> dict:
                     direction=settings.get("trade_direction", "both"),
                     payout=payout or None,
                     fee_pct=fee,
+                    use_guardian=use_guardian,
                 )
             )
         except MarketDataError as exc:
@@ -1180,6 +1244,11 @@ AUTO_NUMBER_SETTINGS = (
     ("dynamic_stake_pct", 2.0, 0.1, 25.0),
     ("dynamic_stake_min", 0.50, 0.35, 1000.0),
     ("dynamic_stake_max", 5.0, 0.35, 10000.0),
+    ("scalp_duration", 30, 1, 1440),
+    ("scalp_take_profit_pct", 30.0, 0.0, 500.0),
+    ("mtf_granularity", 900, 60, 86400),
+    ("market_close_hour_utc", 21, 0, 23),
+    ("deriv_multiplier", 100, 1, 2000),
 )
 
 AUTO_BOOL_SETTINGS = (
@@ -1189,6 +1258,9 @@ AUTO_BOOL_SETTINGS = (
     ("reversal_exit_enabled", True),
     ("stop_and_reverse_enabled", False),
     ("dynamic_stake_enabled", False),
+    ("anchor_scalp_enabled", False),
+    ("mtf_confirm_enabled", False),
+    ("auto_clamp_duration_enabled", False),
 )
 
 
@@ -1204,6 +1276,10 @@ def normalize_auto_settings(payload: dict, current: dict) -> dict:
         cleaned[key] = int(value) if isinstance(default, int) else round(value, 2)
     for key, default in AUTO_BOOL_SETTINGS:
         cleaned[key] = bool(payload.get(key, current.get(key, default)))
+    scalp_unit = str(payload.get("scalp_duration_unit", current.get("scalp_duration_unit", "m")) or "m").strip().lower()
+    cleaned["scalp_duration_unit"] = scalp_unit if scalp_unit in {"t", "s", "m", "h", "d"} else "m"
+    cmode = str(payload.get("deriv_contract_mode", current.get("deriv_contract_mode", "rise_fall")) or "rise_fall").strip().lower()
+    cleaned["deriv_contract_mode"] = cmode if cmode in {"rise_fall", "multiplier"} else "rise_fall"
     return cleaned
 
 
@@ -1358,6 +1434,7 @@ def public_signals():
     public_fields = (
         "symbol", "asset_class", "decision", "price", "regime", "stop_loss",
         "take_profit", "risk_reward_ratio", "reason", "trade_plan",
+        "stop_losses", "take_profits", "mt5_entries",
         "exit_recommendation_basis",
     )
     for row in market:
@@ -1660,6 +1737,60 @@ def binance_live_open(state: dict, symbol: str, side: str, amount: float):
     return jsonify({"message": f"Binance {network} buy filled.", "trade": trade})
 
 
+def sync_open_live_positions(state: dict, broker) -> int:
+    """Recover open contracts from the broker (e.g. after a redeploy wiped local state)."""
+    if not hasattr(broker, "open_contracts"):
+        return 0
+    recovered = broker.open_contracts() or []
+    pending = state["auto_trader"].setdefault("pending_live", [])
+    known = {str(item.get("ref")) for item in pending}
+    added = 0
+    for row in recovered:
+        ref = str(row.get("ref") or "").strip()
+        if not ref or ref in known:
+            continue
+        pending.append(row)
+        known.add(ref)
+        added += 1
+    if added:
+        auto_event(
+            state,
+            "LIVE_SYNC",
+            note=f"Recovered {added} open contract{'s' if added != 1 else ''} from {broker.name}.",
+        )
+    return added
+
+
+@app.post("/api/live-positions/sync")
+def live_positions_sync():
+    state = load_state()
+    broker = None
+    try:
+        broker = live_broker_from_settings(state["settings"])
+        added = sync_open_live_positions(state, broker)
+        # Immediately refresh live unrealized P&L for all tracked contracts
+        for item in state["auto_trader"].get("pending_live", []):
+            try:
+                status = broker.trade_status(item["ref"])
+                if not status.get("settled"):
+                    item["is_valid_to_sell"] = bool(status.get("is_valid_to_sell"))
+                    update_peak_profit(item, status.get("unrealized_profit"))
+            except BrokerError:
+                pass
+    except BrokerError as exc:
+        return error_response(str(exc), 400)
+    finally:
+        if broker is not None:
+            broker.close()
+    save_state(state)
+    count = len(state["auto_trader"].get("pending_live", []))
+    return jsonify({
+        "message": f"Synced with broker: {added} recovered, {count} open total.",
+        "added": added,
+        "auto_trader": state["auto_trader"],
+    })
+
+
 @app.post("/api/live-positions/<ref>/close")
 def live_position_close(ref: str):
     state = load_state()
@@ -1954,6 +2085,7 @@ def settle_live_trades(
             still_pending.append(item)
             continue
         if not status.get("settled"):
+            item["is_valid_to_sell"] = bool(status.get("is_valid_to_sell"))
             update_peak_profit(item, status.get("unrealized_profit"))
             signal = signals.get(item["symbol"])
             exit_reason = evaluate_early_exit(item, status, signal, settings)
@@ -2110,8 +2242,22 @@ def open_auto_trades(
             continue
         if auto["mode"] == "live":
             stake = resolve_live_stake(settings, live_balance)
+            anchor_scalp = bool(settings.get("anchor_scalp_enabled", False))
+            has_existing_symbol = any(row.get("symbol") == symbol for row in auto.get("pending_live", []))
+            role = ("scalp" if has_existing_symbol else "anchor") if anchor_scalp else ""
+            req_dur = int(settings.get("scalp_duration", 30)) if role == "scalp" else int(settings.get("live_trade_duration", 5))
+            req_unit = str(settings.get("scalp_duration_unit", "m")) if role == "scalp" else str(settings.get("live_trade_duration_unit", "t"))
+            is_mult = str(settings.get("deriv_contract_mode") or "rise_fall").lower() == "multiplier"
+            if is_mult:
+                clamped_dur, clamped_unit, was_clamped = req_dur, req_unit, False
+                open_opts = {"contract_mode": "multiplier", "multiplier": int(settings.get("deriv_multiplier", 100))}
+            else:
+                clamped_dur, clamped_unit, was_clamped = clamp_duration_before_close(req_dur, req_unit, now, settings)
+                open_opts = {}
+                if role == "scalp" or was_clamped:
+                    open_opts = {"duration": clamped_dur, "duration_unit": clamped_unit}
             try:
-                trade = broker.open_trade(symbol=symbol, side=side, amount=stake)
+                trade = broker.open_trade(symbol=symbol, side=side, amount=stake, **open_opts)
             except BrokerError as exc:
                 auto["last_error"] = str(exc)
                 reopen_iso = parse_market_closed_until(str(exc), now)
@@ -2140,15 +2286,17 @@ def open_auto_trades(
                     live_balance = float(account_snapshot["balance"])
             auto["pending_live"].append(
                 {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure,
-                 "opened_at": utc_now_iso(), "position": trade.get("position")}
+                 "opened_at": utc_now_iso(), "position": trade.get("position"), "role": role}
             )
             account_id = (account_snapshot or {}).get("account_id") or (account_snapshot or {}).get("loginid") or ""
             account_type = (account_snapshot or {}).get("account_type") or ""
             account_tag = f" [{account_id} {account_type}]" if account_id else ""
             flip_tag = " [Stop-and-Reverse flip]" if is_flip else ""
+            role_tag = f" [{role.title()}]" if role else ""
+            clamp_tag = f" [Trimmed to {clamped_dur}{clamped_unit} before close]" if was_clamped else ""
             note = (
                 f"Live {trade.get('contract_type', '')} via {broker.name}, "
-                f"contract {trade['ref'] or 'pending'}.{account_tag}{flip_tag}"
+                f"contract {trade['ref'] or 'pending'}.{account_tag}{role_tag}{clamp_tag}{flip_tag}"
             )
             if is_flip:
                 auto["flips_today"] = int(auto.get("flips_today") or 0) + 1

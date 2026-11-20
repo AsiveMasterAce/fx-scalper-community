@@ -147,14 +147,20 @@ def evaluate_early_exit(
     profit_pct = (unrealized / stake) * 100.0
     peak = update_peak_profit(item, unrealized)
     peak_pct = ((peak / stake) * 100.0) if peak is not None else profit_pct
+    role = str(item.get("role") or "").lower()
 
-    # 1. Hard Early Take-Profit
-    tp_pct = float(settings.get("early_take_profit_pct") or 0.0)
+    # 1. Hard Early Take-Profit (scalps use their quicker target when configured)
+    if role == "scalp" and float(settings.get("scalp_take_profit_pct") or 0.0) > 0:
+        tp_pct = float(settings.get("scalp_take_profit_pct") or 30.0)
+    else:
+        tp_pct = float(settings.get("early_take_profit_pct") or 0.0)
     if tp_pct > 0 and profit_pct >= tp_pct:
-        return f"Early take-profit hit ({profit_pct:+.1f}% >= +{tp_pct:.1f}%)"
+        label = "Scalp take-profit" if role == "scalp" else "Early take-profit"
+        return f"{label} hit ({profit_pct:+.1f}% >= +{tp_pct:.1f}%)"
 
     # 2. Spike Grab: bank profit on a long stretched / overextended candle before it retests
-    if settings.get("spike_grab_enabled", True) and signal:
+    # Anchor runners skip small spike grabs so they can ride the bigger trend via trailing lock.
+    if role != "anchor" and settings.get("spike_grab_enabled", True) and signal:
         min_spike_pct = float(settings.get("spike_grab_min_profit_pct") or 25.0)
         stretched = str(signal.get("candle_quality") or "").lower() == "stretched"
         band_dist = _safe_float(signal.get("distance_to_band"))
@@ -214,14 +220,17 @@ def _can_scale_in(
             opened = parse_iso(pos.get("opened_at"))
             if opened is not None and opened > cutoff:
                 return False
-    # Require at least one existing trade on this symbol to be clearly in profit
+    # Require the MOST RECENT existing trade on this symbol to be clearly in profit
+    # (prevents stacking into a pullback just because an older anchor trade is still green)
     min_profit_pct = float(settings.get("scale_in_min_profit_pct") or 20.0)
-    for pos in symbol_positions:
-        stake = _safe_float(pos.get("stake") if pos.get("stake") is not None else pos.get("exposure"))
-        unrealized = _safe_float(pos.get("unrealized_profit"))
-        if stake and stake > 0 and unrealized is not None:
-            if (unrealized / stake) * 100.0 >= min_profit_pct:
-                return True
+    latest = max(
+        symbol_positions,
+        key=lambda pos: parse_iso(pos.get("opened_at")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    stake = _safe_float(latest.get("stake") if latest.get("stake") is not None else latest.get("exposure"))
+    unrealized = _safe_float(latest.get("unrealized_profit"))
+    if stake and stake > 0 and unrealized is not None:
+        return (unrealized / stake) * 100.0 >= min_profit_pct
     return False
 
 
@@ -257,6 +266,34 @@ def resolve_live_stake(settings: dict, balance: Optional[float]) -> float:
     high = max(low, float(settings.get("dynamic_stake_max") or 5.0))
     raw = bal * (pct / 100.0)
     return round(max(low, min(high, raw)), 2)
+
+
+def clamp_duration_before_close(
+    duration: int,
+    unit: str,
+    now: datetime,
+    settings: dict,
+) -> Tuple[int, str, bool]:
+    """Trim hour/minute durations so a contract expires before the daily market close.
+
+    Returns (resolved_duration, resolved_unit, was_clamped).
+    """
+    unit_norm = str(unit or "m").strip().lower()
+    if not settings.get("auto_clamp_duration_enabled", False):
+        return int(duration), unit_norm, False
+    if unit_norm not in {"m", "h"}:
+        return int(duration), unit_norm, False
+    total_minutes = int(duration) * (60 if unit_norm == "h" else 1)
+    close_hour = int(settings.get("market_close_hour_utc", 21)) % 24
+    buffer_minutes = 10
+    now_utc = now.astimezone(timezone.utc)
+    close_dt = now_utc.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+    if close_dt <= now_utc:
+        close_dt += timedelta(days=1)
+    available = int((close_dt - now_utc).total_seconds() // 60) - buffer_minutes
+    if available < 15 or total_minutes <= available:
+        return int(duration), unit_norm, False
+    return available, "m", True
 
 
 def pick_entries(
