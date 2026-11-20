@@ -442,6 +442,9 @@ class DerivCommunityClient:
     def buy(self, proposal_id: str, price: float) -> dict:
         return self.send({"buy": proposal_id, "price": float(price)}).get("buy") or {}
 
+    def sell_contract(self, contract_id: int | str, price: float = 0.0) -> dict:
+        return self.send({"sell": int(contract_id), "price": float(price)}).get("sell") or {}
+
 
 def _deriv_settings_signature(settings: dict) -> tuple:
     return (

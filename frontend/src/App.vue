@@ -74,6 +74,25 @@ const settingsForm = reactive({
   auto_hold_minutes: 25,
   auto_paper_exposure: 100,
   paper_starting_balance: 10000,
+  active_exit_enabled: false,
+  early_take_profit_pct: 50,
+  early_stop_loss_pct: 50,
+  spike_grab_enabled: true,
+  spike_grab_min_profit_pct: 25,
+  trailing_profit_enabled: true,
+  trailing_arm_pct: 30,
+  trailing_pullback_pct: 12,
+  reversal_exit_enabled: true,
+  max_positions_per_symbol: 1,
+  scale_in_min_profit_pct: 20,
+  scale_in_cooldown_minutes: 5,
+  guardian_check_interval_seconds: 10,
+  stop_and_reverse_enabled: false,
+  max_flips_per_day: 3,
+  dynamic_stake_enabled: false,
+  dynamic_stake_pct: 2,
+  dynamic_stake_min: 0.5,
+  dynamic_stake_max: 5,
   max_trades_per_day: 0,
   max_loss_streak: 0,
   loss_cooldown_minutes: 0,
@@ -664,6 +683,25 @@ function syncFromBootstrap() {
   settingsForm.auto_hold_minutes = Number(settings.auto_hold_minutes || 25)
   settingsForm.auto_paper_exposure = Number(settings.auto_paper_exposure || 100)
   settingsForm.paper_starting_balance = Number(settings.paper_starting_balance || 10000)
+  settingsForm.active_exit_enabled = Boolean(settings.active_exit_enabled)
+  settingsForm.early_take_profit_pct = Number(settings.early_take_profit_pct ?? 50)
+  settingsForm.early_stop_loss_pct = Number(settings.early_stop_loss_pct ?? 50)
+  settingsForm.spike_grab_enabled = settings.spike_grab_enabled !== false
+  settingsForm.spike_grab_min_profit_pct = Number(settings.spike_grab_min_profit_pct ?? 25)
+  settingsForm.trailing_profit_enabled = settings.trailing_profit_enabled !== false
+  settingsForm.trailing_arm_pct = Number(settings.trailing_arm_pct ?? 30)
+  settingsForm.trailing_pullback_pct = Number(settings.trailing_pullback_pct ?? 12)
+  settingsForm.reversal_exit_enabled = settings.reversal_exit_enabled !== false
+  settingsForm.max_positions_per_symbol = Number(settings.max_positions_per_symbol || 1)
+  settingsForm.scale_in_min_profit_pct = Number(settings.scale_in_min_profit_pct ?? 20)
+  settingsForm.scale_in_cooldown_minutes = Number(settings.scale_in_cooldown_minutes ?? 5)
+  settingsForm.guardian_check_interval_seconds = Number(settings.guardian_check_interval_seconds ?? 10)
+  settingsForm.stop_and_reverse_enabled = Boolean(settings.stop_and_reverse_enabled)
+  settingsForm.max_flips_per_day = Number(settings.max_flips_per_day ?? 3)
+  settingsForm.dynamic_stake_enabled = Boolean(settings.dynamic_stake_enabled)
+  settingsForm.dynamic_stake_pct = Number(settings.dynamic_stake_pct ?? 2)
+  settingsForm.dynamic_stake_min = Number(settings.dynamic_stake_min ?? 0.5)
+  settingsForm.dynamic_stake_max = Number(settings.dynamic_stake_max ?? 5)
   settingsForm.max_trades_per_day = Number(settings.max_trades_per_day || 0)
   settingsForm.max_loss_streak = Number(settings.max_loss_streak || 0)
   settingsForm.loss_cooldown_minutes = Number(settings.loss_cooldown_minutes || 0)
@@ -799,6 +837,25 @@ async function saveSettings() {
         auto_hold_minutes: Number(settingsForm.auto_hold_minutes),
         auto_paper_exposure: Number(settingsForm.auto_paper_exposure),
         paper_starting_balance: Number(settingsForm.paper_starting_balance),
+        active_exit_enabled: settingsForm.active_exit_enabled,
+        early_take_profit_pct: Number(settingsForm.early_take_profit_pct),
+        early_stop_loss_pct: Number(settingsForm.early_stop_loss_pct),
+        spike_grab_enabled: settingsForm.spike_grab_enabled,
+        spike_grab_min_profit_pct: Number(settingsForm.spike_grab_min_profit_pct),
+        trailing_profit_enabled: settingsForm.trailing_profit_enabled,
+        trailing_arm_pct: Number(settingsForm.trailing_arm_pct),
+        trailing_pullback_pct: Number(settingsForm.trailing_pullback_pct),
+        reversal_exit_enabled: settingsForm.reversal_exit_enabled,
+        max_positions_per_symbol: Number(settingsForm.max_positions_per_symbol),
+        scale_in_min_profit_pct: Number(settingsForm.scale_in_min_profit_pct),
+        scale_in_cooldown_minutes: Number(settingsForm.scale_in_cooldown_minutes),
+        guardian_check_interval_seconds: Number(settingsForm.guardian_check_interval_seconds),
+        stop_and_reverse_enabled: settingsForm.stop_and_reverse_enabled,
+        max_flips_per_day: Number(settingsForm.max_flips_per_day),
+        dynamic_stake_enabled: settingsForm.dynamic_stake_enabled,
+        dynamic_stake_pct: Number(settingsForm.dynamic_stake_pct),
+        dynamic_stake_min: Number(settingsForm.dynamic_stake_min),
+        dynamic_stake_max: Number(settingsForm.dynamic_stake_max),
         max_trades_per_day: Number(settingsForm.max_trades_per_day),
         max_loss_streak: Number(settingsForm.max_loss_streak),
         loss_cooldown_minutes: Number(settingsForm.loss_cooldown_minutes),
@@ -1158,8 +1215,21 @@ onMounted(fetchBootstrap)
             Trades currently close after {{ settingsForm.auto_hold_minutes }} minutes, so small moves create small results.
           </div>
           <div v-for="item in autoTrader.pending_live || []" :key="`pl-${item.ref}`" class="item-row">
-            <span>{{ item.symbol }} {{ item.side }} · {{ formatCurrency(item.stake) }} · ref {{ item.ref }}</span>
-            <button v-if="item.position" class="button secondary" :disabled="busy" @click="closeLivePosition(item.ref)">Sell now</button>
+            <div>
+              <strong>{{ item.symbol }} {{ item.side }}</strong> · {{ formatCurrency(item.stake) }} · ref {{ item.ref }}
+              <div v-if="item.unrealized_profit != null" class="kv">
+                Live P&amp;L:
+                <span :class="Number(item.unrealized_profit) >= 0 ? 'positive' : 'negative'">
+                  {{ formatCurrency(item.unrealized_profit) }}
+                </span>
+                <template v-if="item.peak_profit != null">
+                  · Peak: {{ formatCurrency(item.peak_profit) }}
+                </template>
+              </div>
+            </div>
+            <button class="button secondary" :disabled="busy" @click="closeLivePosition(item.ref)">
+              {{ item.position ? 'Sell now' : 'Close early' }}
+            </button>
           </div>
           <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
           <div v-if="autoTrader.last_error" class="status-banner error">
@@ -1419,6 +1489,103 @@ onMounted(fetchBootstrap)
                 <input v-model.number="settingsForm.max_loss_streak" class="input" type="number" min="0" max="100" />
                 <small class="field-help">Use 0 to keep trading.</small>
               </div>
+              <div class="field">
+                <label class="checkbox-row">
+                  <input v-model="settingsForm.active_exit_enabled" type="checkbox" />
+                  <span>Active Trade Guardian (early profit lock &amp; cut-loss)</span>
+                </label>
+                <small class="field-help">Watches live P&amp;L and candles to bank spikes before retests, trail big winners, or cut reversals early.</small>
+              </div>
+              <template v-if="settingsForm.active_exit_enabled">
+                <div class="field">
+                  <label>Early take-profit (% of stake)</label>
+                  <input v-model.number="settingsForm.early_take_profit_pct" class="input" type="number" min="0" max="500" step="1" />
+                  <small class="field-help">Locks profit early and frees the slot to re-enter. 0 disables.</small>
+                </div>
+                <div class="field">
+                  <label>Early stop-loss (% of stake)</label>
+                  <input v-model.number="settingsForm.early_stop_loss_pct" class="input" type="number" min="0" max="100" step="1" />
+                  <small class="field-help">Cuts fast moves against you before full expiry loss. 0 disables.</small>
+                </div>
+                <div class="field">
+                  <label class="checkbox-row">
+                    <input v-model="settingsForm.spike_grab_enabled" type="checkbox" />
+                    <span>Grab profit on long stretched candles before retest</span>
+                  </label>
+                </div>
+                <div v-if="settingsForm.spike_grab_enabled" class="field">
+                  <label>Spike grab minimum profit (%)</label>
+                  <input v-model.number="settingsForm.spike_grab_min_profit_pct" class="input" type="number" min="1" max="500" step="1" />
+                </div>
+                <div class="field">
+                  <label class="checkbox-row">
+                    <input v-model="settingsForm.trailing_profit_enabled" type="checkbox" />
+                    <span>Trail big winners &amp; close on pullback</span>
+                  </label>
+                </div>
+                <div v-if="settingsForm.trailing_profit_enabled" class="field">
+                  <label>Trailing arm / pullback (%)</label>
+                  <div class="inline-actions">
+                    <input v-model.number="settingsForm.trailing_arm_pct" class="input" type="number" min="1" max="500" step="1" title="Arm trailing lock at % profit" />
+                    <input v-model.number="settingsForm.trailing_pullback_pct" class="input" type="number" min="1" max="200" step="1" title="Close if profit pulls back by % from peak" />
+                  </div>
+                  <small class="field-help">Arms at first %; closes if profit pulls back by second % from peak.</small>
+                </div>
+                <div class="field">
+                  <label class="checkbox-row">
+                    <input v-model="settingsForm.reversal_exit_enabled" type="checkbox" />
+                    <span>Exit early if chart flips to opposite signal</span>
+                  </label>
+                </div>
+                <div class="field">
+                  <label>Fast-check open trades every (seconds)</label>
+                  <input v-model.number="settingsForm.guardian_check_interval_seconds" class="input" type="number" min="5" max="60" step="1" />
+                  <small class="field-help">Polls live Deriv P&amp;L between full scans to catch spikes and pullbacks fast.</small>
+                </div>
+                <div v-if="settingsForm.reversal_exit_enabled" class="field">
+                  <label class="checkbox-row">
+                    <input v-model="settingsForm.stop_and_reverse_enabled" type="checkbox" />
+                    <span>Stop-and-Reverse (immediately flip into the new direction)</span>
+                  </label>
+                </div>
+                <div v-if="settingsForm.reversal_exit_enabled && settingsForm.stop_and_reverse_enabled" class="field">
+                  <label>Max flips per day</label>
+                  <input v-model.number="settingsForm.max_flips_per_day" class="input" type="number" min="0" max="50" step="1" />
+                  <small class="field-help">Caps reversals per day so choppy markets cannot whipsaw you. 0 = unlimited.</small>
+                </div>
+              </template>
+              <div class="field">
+                <label class="checkbox-row">
+                  <input v-model="settingsForm.dynamic_stake_enabled" type="checkbox" />
+                  <span>Auto-compounding stake (% of live balance)</span>
+                </label>
+                <small class="field-help">Scales live stake automatically as your Deriv balance grows or shrinks.</small>
+              </div>
+              <template v-if="settingsForm.dynamic_stake_enabled">
+                <div class="field">
+                  <label>Stake % / Min $ / Max $</label>
+                  <div class="inline-actions">
+                    <input v-model.number="settingsForm.dynamic_stake_pct" class="input" type="number" min="0.1" max="25" step="0.1" title="Percent of live balance per trade" />
+                    <input v-model.number="settingsForm.dynamic_stake_min" class="input" type="number" min="0.35" max="1000" step="0.05" title="Minimum stake" />
+                    <input v-model.number="settingsForm.dynamic_stake_max" class="input" type="number" min="0.35" max="10000" step="0.5" title="Maximum stake" />
+                  </div>
+                </div>
+              </template>
+              <div class="field">
+                <label>Max stacked trades per market</label>
+                <input v-model.number="settingsForm.max_positions_per_symbol" class="input" type="number" min="1" max="10" />
+                <small class="field-help">1 = one trade per market. 2+ lets the bot add to winning trends.</small>
+              </div>
+              <template v-if="settingsForm.max_positions_per_symbol > 1">
+                <div class="field">
+                  <label>Scale-in min profit (%) / spacing (min)</label>
+                  <div class="inline-actions">
+                    <input v-model.number="settingsForm.scale_in_min_profit_pct" class="input" type="number" min="0" max="500" step="1" title="Existing trade must be in profit by at least %" />
+                    <input v-model.number="settingsForm.scale_in_cooldown_minutes" class="input" type="number" min="0" max="1440" step="1" title="Minimum minutes between stacked trades" />
+                  </div>
+                  <small class="field-help">Only stacks when an existing trade is already winning by this %.</small>
+                </div>
+              </template>
               <div v-if="showAdvancedTrading" class="field">
                 <label>Cooldown After A Loss (minutes)</label>
                 <input v-model.number="settingsForm.loss_cooldown_minutes" class="input" type="number" min="0" max="1440" />

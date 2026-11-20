@@ -32,11 +32,15 @@ from app.autotrader import (
     day_summary,
     default_auto_state,
     due_positions,
+    evaluate_early_exit,
     paper_pnl,
+    parse_market_closed_until,
     performance,
     pick_entries,
     record_close,
+    resolve_live_stake,
     roll_day,
+    update_peak_profit,
     utcnow,
 )
 from app.brokers import BrokerError, live_broker_from_settings
@@ -220,6 +224,25 @@ DEFAULT_STATE = {
         "auto_hold_minutes": 25,
         "auto_paper_exposure": 100.0,
         "paper_starting_balance": 10000.0,
+        "active_exit_enabled": False,
+        "early_take_profit_pct": 50.0,
+        "early_stop_loss_pct": 50.0,
+        "spike_grab_enabled": True,
+        "spike_grab_min_profit_pct": 25.0,
+        "trailing_profit_enabled": True,
+        "trailing_arm_pct": 30.0,
+        "trailing_pullback_pct": 12.0,
+        "reversal_exit_enabled": True,
+        "max_positions_per_symbol": 1,
+        "scale_in_min_profit_pct": 20.0,
+        "scale_in_cooldown_minutes": 5,
+        "guardian_check_interval_seconds": 10,
+        "stop_and_reverse_enabled": False,
+        "max_flips_per_day": 3,
+        "dynamic_stake_enabled": False,
+        "dynamic_stake_pct": 2.0,
+        "dynamic_stake_min": 0.50,
+        "dynamic_stake_max": 5.0,
     },
     "portfolio": [],
     "trade_history": [],
@@ -1144,6 +1167,28 @@ AUTO_NUMBER_SETTINGS = (
     ("loss_cooldown_minutes", 0, 0, 1440),
     ("trading_hours_start", 0, 0, 23),
     ("trading_hours_end", 0, 0, 24),
+    ("early_take_profit_pct", 50.0, 0.0, 500.0),
+    ("early_stop_loss_pct", 50.0, 0.0, 100.0),
+    ("spike_grab_min_profit_pct", 25.0, 1.0, 500.0),
+    ("trailing_arm_pct", 30.0, 1.0, 500.0),
+    ("trailing_pullback_pct", 12.0, 1.0, 200.0),
+    ("max_positions_per_symbol", 1, 1, 10),
+    ("scale_in_min_profit_pct", 20.0, 0.0, 500.0),
+    ("scale_in_cooldown_minutes", 5, 0, 1440),
+    ("guardian_check_interval_seconds", 10, 5, 60),
+    ("max_flips_per_day", 3, 0, 50),
+    ("dynamic_stake_pct", 2.0, 0.1, 25.0),
+    ("dynamic_stake_min", 0.50, 0.35, 1000.0),
+    ("dynamic_stake_max", 5.0, 0.35, 10000.0),
+)
+
+AUTO_BOOL_SETTINGS = (
+    ("active_exit_enabled", False),
+    ("spike_grab_enabled", True),
+    ("trailing_profit_enabled", True),
+    ("reversal_exit_enabled", True),
+    ("stop_and_reverse_enabled", False),
+    ("dynamic_stake_enabled", False),
 )
 
 
@@ -1157,6 +1202,8 @@ def normalize_auto_settings(payload: dict, current: dict) -> dict:
             value = float(current.get(key, default))
         value = max(low, min(high, value))
         cleaned[key] = int(value) if isinstance(default, int) else round(value, 2)
+    for key, default in AUTO_BOOL_SETTINGS:
+        cleaned[key] = bool(payload.get(key, current.get(key, default)))
     return cleaned
 
 
@@ -1621,11 +1668,18 @@ def live_position_close(ref: str):
     if item is None:
         return error_response("No open live position with that reference.", 404)
     broker = None
+    refreshed = None
     try:
         broker = live_broker_from_settings(state["settings"])
         if getattr(broker, "settles_itself", True):
-            return error_response(f"{broker.name} contracts settle on their own.", 400)
-        result = broker.close_trade(item.get("position") or {})
+            result = broker.sell_early(ref, stake=float(item.get("stake") or 0.0))
+        else:
+            result = broker.close_trade(item.get("position") or {})
+        if hasattr(broker, "refresh_balance"):
+            try:
+                refreshed = broker.refresh_balance(source="manual_close")
+            except BrokerError:
+                refreshed = None
     except BrokerError as exc:
         return error_response(str(exc), 400)
     finally:
@@ -1635,7 +1689,16 @@ def live_position_close(ref: str):
     record_close(auto, state["settings"], symbol=item["symbol"], side=item["side"],
                  pnl=result["profit"], now=utcnow(), mode="live")
     auto_event(state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
-               f"Position {ref} closed manually {float(result['profit']):+.2f}.")
+               f"Contract {ref} closed early manually {float(result['profit']):+.2f}."
+               if not item.get("position")
+               else f"Position {ref} closed manually {float(result['profit']):+.2f}.")
+    if isinstance(refreshed, dict):
+        sync_broker_snapshot(
+            state,
+            refreshed,
+            message="Deriv balance refreshed after manual early exit.",
+            source="manual_close",
+        )
     save_state(state)
     return jsonify({"message": "Position closed.", "result": result, "auto_trader": auto})
 
@@ -1854,22 +1917,78 @@ def position_status(broker, item: dict, now, hold_minutes: object) -> dict:
     return {"settled": True, **broker.close_trade(item.get("position") or {})}
 
 
-def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
+def _current_live_balance(state: dict) -> Optional[float]:
+    sync = BALANCE_SYNC.get_status(state.get("settings"), state.get("last_broker_status"))
+    val = sync.get("balance")
+    if val is not None:
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+    last_status = state.get("last_broker_status") or {}
+    if last_status.get("balance") is not None:
+        try:
+            return float(last_status["balance"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def settle_live_trades(
+    state: dict,
+    auto: dict,
+    broker,
+    now,
+    market_by_symbol: Optional[dict] = None,
+) -> list:
     still_pending = []
     settled_any = False
+    flip_signals = []
+    settings = state["settings"]
+    signals = market_by_symbol or {}
     for item in auto["pending_live"]:
         try:
-            status = position_status(broker, item, now, state["settings"].get("auto_hold_minutes", 25))
+            status = position_status(broker, item, now, settings.get("auto_hold_minutes", 25))
         except BrokerError as exc:
             auto["last_error"] = str(exc)
             still_pending.append(item)
             continue
         if not status.get("settled"):
+            update_peak_profit(item, status.get("unrealized_profit"))
+            signal = signals.get(item["symbol"])
+            exit_reason = evaluate_early_exit(item, status, signal, settings)
+            if exit_reason and hasattr(broker, "sell_early"):
+                try:
+                    sold = broker.sell_early(item["ref"], stake=float(item.get("stake") or 0.0))
+                except BrokerError as exc:
+                    auto["last_error"] = str(exc)
+                    still_pending.append(item)
+                    continue
+                settled_any = True
+                pnl = float(sold["profit"])
+                record_close(
+                    auto, settings, symbol=item["symbol"], side=item["side"],
+                    pnl=pnl, now=now, mode="live",
+                )
+                auto_event(
+                    state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
+                    f"Contract {item['ref']} closed early ({exit_reason}) for {pnl:+.2f}.",
+                )
+                if (
+                    exit_reason.startswith("Chart reversed to ")
+                    and settings.get("stop_and_reverse_enabled", False)
+                    and signal
+                ):
+                    max_flips = int(settings.get("max_flips_per_day") or 0)
+                    flips_today = int(auto.get("flips_today") or 0)
+                    if max_flips == 0 or flips_today < max_flips:
+                        flip_signals.append({**signal, "_is_flip": True})
+                continue
             still_pending.append(item)
             continue
         settled_any = True
         record_close(
-            auto, state["settings"], symbol=item["symbol"], side=item["side"],
+            auto, settings, symbol=item["symbol"], side=item["side"],
             pnl=status["profit"], now=now, mode="live",
         )
         auto_event(
@@ -1890,22 +2009,50 @@ def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
                 )
         except BrokerError as exc:
             auto["last_error"] = str(exc)
+    return flip_signals
 
 
-def close_due_paper_positions(state: dict, auto: dict, now) -> None:
+def close_due_paper_positions(
+    state: dict,
+    auto: dict,
+    now,
+    market_by_symbol: Optional[dict] = None,
+) -> None:
     settings = state["settings"]
+    signals = market_by_symbol or {}
     prices = {row["symbol"]: row["price"] for row in configured_market_snapshots(settings)}
-    for position in due_positions(state.get("portfolio", []), now, settings.get("auto_hold_minutes", 25)):
+    due_ids = {
+        position["id"]
+        for position in due_positions(state.get("portfolio", []), now, settings.get("auto_hold_minutes", 25))
+    }
+    remaining = []
+    for position in state.get("portfolio", []):
+        if not position.get("auto"):
+            remaining.append(position)
+            continue
         price = float(prices.get(position["symbol"]) or position["current_price"])
+        position["current_price"] = price
         pnl = paper_pnl(position, price)
-        state["portfolio"] = [row for row in state["portfolio"] if row["id"] != position["id"]]
-        record_close(
-            auto, settings, symbol=position["symbol"], side=position["side"], pnl=pnl, now=now, mode="paper"
+        update_peak_profit(position, pnl)
+        exit_reason = evaluate_early_exit(
+            position,
+            {"is_valid_to_sell": True, "unrealized_profit": pnl},
+            signals.get(position["symbol"]),
+            settings,
         )
-        auto_event(
-            state, "AUTO_CLOSE", position["symbol"], position["side"], position["exposure"],
-            f"Closed at {price} after the hold time. P&L {pnl:+.2f}.",
-        )
+        if exit_reason or position["id"] in due_ids:
+            record_close(
+                auto, settings, symbol=position["symbol"], side=position["side"], pnl=pnl, now=now, mode="paper"
+            )
+            note = (
+                f"Closed early at {price} ({exit_reason}). P&L {pnl:+.2f}."
+                if exit_reason
+                else f"Closed at {price} after the hold time. P&L {pnl:+.2f}."
+            )
+            auto_event(state, "AUTO_CLOSE", position["symbol"], position["side"], position["exposure"], note)
+        else:
+            remaining.append(position)
+    state["portfolio"] = remaining
 
 
 def open_paper_auto_trade(state: dict, signal: dict) -> tuple:
@@ -1927,29 +2074,57 @@ def open_paper_auto_trade(state: dict, signal: dict) -> tuple:
     return exposure, f"Auto paper {signal['decision']} at {price}: {signal.get('reason', '')}"
 
 
-def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
+def open_auto_trades(
+    state: dict,
+    auto: dict,
+    broker,
+    now,
+    market_rows: Optional[list] = None,
+    flip_signals: Optional[list] = None,
+) -> None:
     settings = state["settings"]
     if auto["mode"] == "paper" and not settings.get("paper_trading_enabled", True):
         return
-    held = state.get("portfolio", []) + [{"symbol": item["symbol"]} for item in auto["pending_live"]]
-    for signal in pick_entries(market_view(settings), held, settings, len(held)):
+    held = list(state.get("portfolio", [])) + list(auto.get("pending_live", []))
+    rows = market_rows if market_rows is not None else market_view(settings)
+    paused_map = dict(auto.get("symbol_paused_until") or {})
+    picks = pick_entries(rows, held, settings, len(held), now=now, symbol_paused_until=paused_map)
+    flip_symbols = {sig["symbol"] for sig in (flip_signals or [])}
+    # Ensure flip signals are tagged if already in picks, or appended if room permits
+    picked_symbols = {sig["symbol"] for sig in picks}
+    for sig in (flip_signals or []):
+        if sig["symbol"] in picked_symbols:
+            for item in picks:
+                if item["symbol"] == sig["symbol"]:
+                    item["_is_flip"] = True
+        elif len(held) + len(picks) < int(settings.get("max_open_positions", 6)):
+            picks.append(sig)
+
+    live_balance = _current_live_balance(state) if auto["mode"] == "live" else None
+    for signal in picks:
         symbol, side = signal["symbol"], signal["decision"]
+        is_flip = bool(signal.get("_is_flip")) or (symbol in flip_symbols)
         if auto["mode"] == "live" and side not in getattr(broker, "sides", {"BUY", "SELL"}):
             allowed = "/".join(sorted(broker.sides))
             auto["paused_reason"] = f"{broker.name} only opens {allowed}; skipped {side} {symbol}."
             continue
         if auto["mode"] == "live":
-            stake = float(settings.get("live_trade_stake", 1.0))
+            stake = resolve_live_stake(settings, live_balance)
             try:
                 trade = broker.open_trade(symbol=symbol, side=side, amount=stake)
             except BrokerError as exc:
                 auto["last_error"] = str(exc)
+                reopen_iso = parse_market_closed_until(str(exc), now)
+                if reopen_iso:
+                    paused_map[symbol] = reopen_iso
+                    auto["symbol_paused_until"] = paused_map
                 duration = settings.get("live_trade_duration", 5)
                 unit = settings.get("live_trade_duration_unit", "t")
                 units = {"t": "ticks", "s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+                pause_suffix = f" Paused {symbol} until {reopen_iso}." if reopen_iso else ""
                 auto_event(
                     state, "AUTO_ERROR", symbol, side, stake,
-                    f"Live trade rejected using {duration} {units.get(str(unit), unit)}: {exc}",
+                    f"Live trade rejected using {duration} {units.get(str(unit), unit)}: {exc}{pause_suffix}",
                 )
                 continue
             exposure = trade["price"]
@@ -1961,6 +2136,8 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
                     message="Deriv balance refreshed after contract purchase.",
                     source="purchase",
                 )
+                if account_snapshot.get("balance") is not None:
+                    live_balance = float(account_snapshot["balance"])
             auto["pending_live"].append(
                 {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure,
                  "opened_at": utc_now_iso(), "position": trade.get("position")}
@@ -1968,10 +2145,13 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
             account_id = (account_snapshot or {}).get("account_id") or (account_snapshot or {}).get("loginid") or ""
             account_type = (account_snapshot or {}).get("account_type") or ""
             account_tag = f" [{account_id} {account_type}]" if account_id else ""
+            flip_tag = " [Stop-and-Reverse flip]" if is_flip else ""
             note = (
                 f"Live {trade.get('contract_type', '')} via {broker.name}, "
-                f"contract {trade['ref'] or 'pending'}.{account_tag}"
+                f"contract {trade['ref'] or 'pending'}.{account_tag}{flip_tag}"
             )
+            if is_flip:
+                auto["flips_today"] = int(auto.get("flips_today") or 0) + 1
         else:
             exposure, note = open_paper_auto_trade(state, signal)
         auto["trades_today"] = int(auto["trades_today"]) + 1
@@ -1981,7 +2161,7 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
 
 
 def auto_trade_tick(now=None) -> dict:
-    """One pass of the loop: settle, scan, close due paper trades, enforce daily limits, open trades."""
+    """One pass of the loop: scan, settle/early-exit, close due paper trades, enforce daily limits, open trades."""
     now = now or utcnow()
     with AUTO_LOCK:
         state = load_state()
@@ -1993,16 +2173,19 @@ def auto_trade_tick(now=None) -> dict:
         if summary:
             auto_event(state, "DAILY_SUMMARY", note=summary)
         broker = None
+        flip_signals = []
         try:
-            if auto["mode"] == "live":
-                broker = live_broker_from_settings(state["settings"])
-                settle_live_trades(state, auto, broker, now)
             report = run_market_scan(state)
             if report.get("errors") and not report.get("scanned"):
                 auto["last_error"] = report["errors"][0]["error"]
             elif report.get("scanned"):
                 auto["last_error"] = ""
-            close_due_paper_positions(state, auto, now)
+            market_rows = market_view(state["settings"])
+            market_by_symbol = {row["symbol"]: row for row in market_rows}
+            if auto["mode"] == "live":
+                broker = live_broker_from_settings(state["settings"])
+                flip_signals = settle_live_trades(state, auto, broker, now, market_by_symbol=market_by_symbol)
+            close_due_paper_positions(state, auto, now, market_by_symbol=market_by_symbol)
             reason, halt = blocking_reason(auto, state["settings"], now)
             auto["paused_reason"] = "" if halt else reason
             if halt:
@@ -2010,7 +2193,7 @@ def auto_trade_tick(now=None) -> dict:
                     auto_event(state, "AUTO_HALT", note=reason)
                 auto["halted_reason"] = reason
             elif not reason:
-                open_auto_trades(state, auto, broker, now)
+                open_auto_trades(state, auto, broker, now, market_rows=market_rows, flip_signals=flip_signals)
         except BrokerError as exc:
             auto["last_error"] = str(exc)
         finally:
@@ -2022,18 +2205,81 @@ def auto_trade_tick(now=None) -> dict:
         return auto
 
 
+def guardian_tick(now=None) -> dict:
+    """Fast lightweight check of open live contracts between full candle scans."""
+    now = now or utcnow()
+    with AUTO_LOCK:
+        state = load_state()
+        auto = state["auto_trader"]
+        settings = state["settings"]
+        if (
+            not auto.get("running")
+            or auto.get("mode") != "live"
+            or not auto.get("pending_live")
+            or not settings.get("active_exit_enabled", False)
+        ):
+            return auto
+        broker = None
+        try:
+            market_rows = market_view(settings)
+            market_by_symbol = {row["symbol"]: row for row in market_rows}
+            broker = live_broker_from_settings(settings)
+            before_count = len(auto["pending_live"])
+            flip_signals = settle_live_trades(state, auto, broker, now, market_by_symbol=market_by_symbol)
+            if len(auto["pending_live"]) < before_count:
+                reason, halt = blocking_reason(auto, settings, now)
+                auto["paused_reason"] = "" if halt else reason
+                if halt:
+                    if not auto["halted_reason"]:
+                        auto_event(state, "AUTO_HALT", note=reason)
+                    auto["halted_reason"] = reason
+                elif not reason:
+                    open_auto_trades(state, auto, broker, now, market_rows=market_rows, flip_signals=flip_signals)
+        except BrokerError as exc:
+            auto["last_error"] = str(exc)
+        finally:
+            if broker is not None:
+                broker.close()
+        state["auto_trader"] = auto
+        save_state(state)
+        return auto
+
+
 def _auto_loop() -> None:
     while True:
         try:
             auto = auto_trade_tick()
             if not auto.get("running"):
                 return
-            interval = int(load_state()["settings"].get("auto_scan_interval_seconds", 300))
+            settings = load_state()["settings"]
+            interval = int(settings.get("auto_scan_interval_seconds", 300))
+            guardian_step = int(settings.get("guardian_check_interval_seconds", 10))
         except Exception:
             app.logger.exception("auto-trader tick failed")
             interval = 60
-        if _auto_stop.wait(interval):
-            return
+            guardian_step = 10
+            auto = {}
+            settings = {}
+
+        remaining = float(interval)
+        while remaining > 0:
+            use_fast = (
+                bool(auto.get("pending_live"))
+                and auto.get("mode") == "live"
+                and bool(settings.get("active_exit_enabled", False))
+                and guardian_step < remaining
+            )
+            sleep_for = min(remaining, float(guardian_step)) if use_fast else remaining
+            if _auto_stop.wait(sleep_for):
+                return
+            remaining -= sleep_for
+            if use_fast and remaining > 0:
+                try:
+                    auto = guardian_tick()
+                    if not auto.get("running"):
+                        return
+                except Exception:
+                    app.logger.exception("guardian tick failed")
 
 
 def start_auto_thread() -> None:

@@ -50,6 +50,10 @@ class LiveBroker:
         """Close a position that does not settle itself. Returns {"profit": float}."""
         raise NotImplementedError
 
+    def sell_early(self, ref: str, stake: float = 0.0, price: float = 0.0) -> dict:
+        """Sell an open contract early before expiry. Returns {"profit": float, "sold_for": float}."""
+        raise BrokerError(f"{self.name} does not support early contract exit.")
+
     def refresh_balance(self, *, source: str = "refresh") -> Optional[dict]:
         """Fetch an authoritative account/balance snapshot from the broker if supported."""
         return None
@@ -142,6 +146,15 @@ class DerivBroker(LiveBroker):
             "buy": buy,
         }
 
+    @staticmethod
+    def _opt_float(value: object) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def trade_status(self, ref: str) -> dict:
         try:
             self._connected()
@@ -150,11 +163,39 @@ class DerivBroker(LiveBroker):
             raise BrokerError(str(exc)) from exc
         contract = response.get("proposal_open_contract") or {}
         settled = bool(contract.get("is_sold")) or contract.get("status") in {"won", "lost", "sold"}
+        raw_profit = self._opt_float(contract.get("profit"))
+        bid_price = self._opt_float(contract.get("bid_price"))
+        buy_price = self._opt_float(contract.get("buy_price"))
+        if raw_profit is None and bid_price is not None and buy_price is not None:
+            raw_profit = round(bid_price - buy_price, 4)
+        return {
+            "settled": settled and raw_profit is not None,
+            "profit": raw_profit if settled else None,
+            "unrealized_profit": None if settled else raw_profit,
+            "bid_price": bid_price,
+            "buy_price": buy_price,
+            "current_spot": self._opt_float(contract.get("current_spot")),
+            "entry_spot": self._opt_float(contract.get("entry_spot")),
+            "is_valid_to_sell": bool(contract.get("is_valid_to_sell")),
+            "status": contract.get("status"),
+        }
+
+    def sell_early(self, ref: str, stake: float = 0.0, price: float = 0.0) -> dict:
         try:
-            profit = float(contract.get("profit")) if settled else None
-        except (TypeError, ValueError):
-            profit = None
-        return {"settled": settled and profit is not None, "profit": profit, "status": contract.get("status")}
+            self._connected()
+            sold = self.client.sell_contract(ref, price=price)
+        except (DerivServiceError, ValueError) as exc:
+            raise BrokerError(str(exc)) from exc
+        sold_for = self._opt_float(sold.get("sold_for"))
+        if sold_for is None:
+            raise BrokerError("Deriv did not return a sold_for price for the early exit.")
+        profit = round(sold_for - float(stake), 2)
+        return {
+            "profit": profit,
+            "sold_for": round(sold_for, 2),
+            "contract_id": str(sold.get("contract_id") or ref),
+            "raw": sold,
+        }
 
     def close(self) -> None:
         self.client.close()

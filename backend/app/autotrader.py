@@ -5,6 +5,7 @@ asks this module what to close, whether a daily limit is hit, and what to open.
 """
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import List, Optional, Tuple
 
 DIRECTION_SIDES = {"both": {"BUY", "SELL"}, "buy": {"BUY"}, "sell": {"SELL"}}
@@ -32,6 +33,8 @@ def default_auto_state() -> dict:
         "loss_streak": 0,
         "cooldown_until": None,
         "closed_trades": [],
+        "flips_today": 0,
+        "symbol_paused_until": {},
     }
 
 
@@ -55,6 +58,7 @@ def roll_day(auto: dict, now: datetime) -> dict:
                 "wins_today": 0,
                 "losses_today": 0,
                 "loss_streak": 0,
+                "flips_today": 0,
             }
         )
     return auto
@@ -93,18 +97,204 @@ def due_positions(portfolio: List[dict], now: datetime, hold_minutes: float) -> 
     return due
 
 
-def pick_entries(market: List[dict], portfolio: List[dict], settings: dict, open_count: int) -> List[dict]:
-    """Signals to act on: allowed direction, one position per symbol, under max_open_positions."""
+def _safe_float(value: object) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def update_peak_profit(item: dict, unrealized_profit: Optional[float]) -> Optional[float]:
+    """Track the highest unrealized profit seen so far on an open trade."""
+    if unrealized_profit is None:
+        return _safe_float(item.get("peak_profit"))
+    current = round(float(unrealized_profit), 4)
+    item["unrealized_profit"] = current
+    prev_peak = _safe_float(item.get("peak_profit"))
+    peak = current if prev_peak is None else max(prev_peak, current)
+    item["peak_profit"] = round(peak, 4)
+    return item["peak_profit"]
+
+
+def evaluate_early_exit(
+    item: dict,
+    status: dict,
+    signal: Optional[dict],
+    settings: dict,
+) -> Optional[str]:
+    """Decide whether an open trade should exit early ("Human Eye" Trade Guardian).
+
+    Supports:
+    - Hard Early Take-Profit (locks in target % of stake immediately)
+    - Spike Grab (exits on a stretched/overextended impulse candle while green, before retest)
+    - Trailing Profit Lock (lets big runners ride, exits on first pullback from peak_profit)
+    - Reversal Exit (exits early if the chart signal flips to the opposite direction)
+    - Hard Early Stop-Loss (cuts fast adverse moves before full -100% expiry loss)
+    """
+    if not settings.get("active_exit_enabled", False):
+        return None
+    if not status.get("is_valid_to_sell", False):
+        return None
+    unrealized = _safe_float(status.get("unrealized_profit"))
+    if unrealized is None:
+        return None
+    stake = _safe_float(item.get("stake") if item.get("stake") is not None else item.get("exposure"))
+    if stake is None or stake <= 0:
+        return None
+
+    profit_pct = (unrealized / stake) * 100.0
+    peak = update_peak_profit(item, unrealized)
+    peak_pct = ((peak / stake) * 100.0) if peak is not None else profit_pct
+
+    # 1. Hard Early Take-Profit
+    tp_pct = float(settings.get("early_take_profit_pct") or 0.0)
+    if tp_pct > 0 and profit_pct >= tp_pct:
+        return f"Early take-profit hit ({profit_pct:+.1f}% >= +{tp_pct:.1f}%)"
+
+    # 2. Spike Grab: bank profit on a long stretched / overextended candle before it retests
+    if settings.get("spike_grab_enabled", True) and signal:
+        min_spike_pct = float(settings.get("spike_grab_min_profit_pct") or 25.0)
+        stretched = str(signal.get("candle_quality") or "").lower() == "stretched"
+        band_dist = _safe_float(signal.get("distance_to_band"))
+        overextended = band_dist is not None and band_dist >= 0.85
+        if profit_pct >= min_spike_pct and (stretched or overextended):
+            tag = "stretched candle" if stretched else "band overextension"
+            return f"Spike grab before retest ({profit_pct:+.1f}% on {tag})"
+
+    # 3. Trailing Profit Lock: let big moves run, close on pullback from peak
+    if settings.get("trailing_profit_enabled", True):
+        arm_pct = float(settings.get("trailing_arm_pct") or 30.0)
+        pullback_pct = float(settings.get("trailing_pullback_pct") or 12.0)
+        if arm_pct > 0 and pullback_pct > 0 and peak_pct >= arm_pct and profit_pct > 0:
+            drawdown_from_peak = peak_pct - profit_pct
+            if drawdown_from_peak >= pullback_pct:
+                return (
+                    f"Trailing profit lock (peaked {peak_pct:+.1f}%, pulled back "
+                    f"{drawdown_from_peak:.1f}% to {profit_pct:+.1f}%)"
+                )
+
+    # 4. Reversal Exit: chart flipped to the opposite side
+    if settings.get("reversal_exit_enabled", True) and signal:
+        side = str(item.get("side") or "").upper()
+        decision = str(signal.get("decision") or "").upper()
+        opposite = (side == "BUY" and decision == "SELL") or (side == "SELL" and decision == "BUY")
+        if opposite:
+            return f"Chart reversed to {decision} while {side} ({profit_pct:+.1f}%)"
+
+    # 5. Hard Early Stop-Loss
+    sl_pct = float(settings.get("early_stop_loss_pct") or 0.0)
+    if sl_pct > 0 and profit_pct <= -sl_pct:
+        return f"Early stop-loss hit ({profit_pct:+.1f}% <= -{sl_pct:.1f}%)"
+
+    return None
+
+
+def _can_scale_in(
+    symbol_positions: List[dict],
+    side: str,
+    settings: dict,
+    now: Optional[datetime],
+) -> bool:
+    """Allow adding a stacked position on a symbol only when existing trades are winning in the same direction."""
+    max_per_symbol = max(1, int(settings.get("max_positions_per_symbol") or 1))
+    if len(symbol_positions) >= max_per_symbol:
+        return False
+    if not symbol_positions:
+        return True
+    # Never hedge or average into a different direction
+    if any(str(pos.get("side") or "").upper() != side for pos in symbol_positions):
+        return False
+    # Respect spacing between stacked entries
+    cooldown_min = float(settings.get("scale_in_cooldown_minutes") or 0.0)
+    if cooldown_min > 0 and now is not None:
+        cutoff = now - timedelta(minutes=cooldown_min)
+        for pos in symbol_positions:
+            opened = parse_iso(pos.get("opened_at"))
+            if opened is not None and opened > cutoff:
+                return False
+    # Require at least one existing trade on this symbol to be clearly in profit
+    min_profit_pct = float(settings.get("scale_in_min_profit_pct") or 20.0)
+    for pos in symbol_positions:
+        stake = _safe_float(pos.get("stake") if pos.get("stake") is not None else pos.get("exposure"))
+        unrealized = _safe_float(pos.get("unrealized_profit"))
+        if stake and stake > 0 and unrealized is not None:
+            if (unrealized / stake) * 100.0 >= min_profit_pct:
+                return True
+    return False
+
+
+_CLOSED_WINDOW_RE = re.compile(
+    r"not available from\s+(\d{2}):(\d{2}):(\d{2})\s+to\s+(\d{2}):(\d{2}):(\d{2})",
+    re.IGNORECASE,
+)
+
+
+def parse_market_closed_until(error_message: str, now: datetime) -> Optional[str]:
+    """Parse Deriv 'Trading is not available from HH:MM:SS to HH:MM:SS' into a UTC reopen ISO timestamp."""
+    match = _CLOSED_WINDOW_RE.search(str(error_message or ""))
+    if not match:
+        return None
+    end_h, end_m, end_s = int(match.group(4)), int(match.group(5)), int(match.group(6))
+    now_utc = now.astimezone(timezone.utc)
+    reopen = now_utc.replace(hour=end_h, minute=end_m, second=end_s, microsecond=0) + timedelta(minutes=1)
+    if reopen <= now_utc:
+        reopen += timedelta(days=1)
+    return iso(reopen)
+
+
+def resolve_live_stake(settings: dict, balance: Optional[float]) -> float:
+    """Resolve live stake: fixed live_trade_stake, or % of live balance clamped to [min, max]."""
+    base = float(settings.get("live_trade_stake", 1.0))
+    if not settings.get("dynamic_stake_enabled", False):
+        return round(max(0.35, base), 2)
+    bal = _safe_float(balance)
+    if bal is None or bal <= 0:
+        return round(max(0.35, base), 2)
+    pct = float(settings.get("dynamic_stake_pct") or 2.0)
+    low = max(0.35, float(settings.get("dynamic_stake_min") or 0.50))
+    high = max(low, float(settings.get("dynamic_stake_max") or 5.0))
+    raw = bal * (pct / 100.0)
+    return round(max(low, min(high, raw)), 2)
+
+
+def pick_entries(
+    market: List[dict],
+    portfolio: List[dict],
+    settings: dict,
+    open_count: int,
+    *,
+    now: Optional[datetime] = None,
+    symbol_paused_until: Optional[dict] = None,
+) -> List[dict]:
+    """Signals to act on: allowed direction, per-symbol cap (with winning scale-in), under max_open_positions."""
     sides = DIRECTION_SIDES.get(str(settings.get("trade_direction") or "both"), DIRECTION_SIDES["both"])
-    held = {position["symbol"] for position in portfolio}
+    paused = symbol_paused_until or {}
+    by_symbol: dict = {}
+    for position in portfolio:
+        by_symbol.setdefault(position["symbol"], []).append(position)
     room = max(0, int(settings.get("max_open_positions", 6)) - open_count)
     picks = []
     for row in market:
         if len(picks) >= room:
             break
-        if row.get("decision") in sides and row["symbol"] not in held:
+        decision = row.get("decision")
+        symbol = row["symbol"]
+        if decision not in sides:
+            continue
+        if now is not None and symbol in paused:
+            until = parse_iso(paused.get(symbol))
+            if until is not None and now < until:
+                continue
+        existing = by_symbol.get(symbol, [])
+        if not existing:
             picks.append(row)
-            held.add(row["symbol"])
+            by_symbol[symbol] = [{"symbol": symbol, "side": decision}]
+        elif _can_scale_in(existing, decision, settings, now):
+            picks.append(row)
+            # Only add at most one stacked trade per symbol per tick
+            by_symbol[symbol] = existing + [{"symbol": symbol, "side": decision, "opened_at": iso(now) if now else None}]
     return picks
 
 
